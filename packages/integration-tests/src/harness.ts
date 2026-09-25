@@ -66,6 +66,18 @@ export type GatekeeperSpec = {
   patch?: (config: WorkerConfig) => void;
 };
 
+/** A non-gatekeeper Worker the Workshop reaches through a service binding, e.g. `TENANT_POLICY`. */
+export type ServiceSpec = {
+  /** Binding name on the Workshop, used verbatim. */
+  binding: string;
+  /** The Worker package's directory, holding the wrangler.jsonc to boot. */
+  dir: string;
+  /** Named entrypoint the binding targets; the default export when omitted. */
+  entrypoint?: string;
+  /** Adjust the Worker's config after it's read. */
+  patch?: (config: WorkerConfig) => void;
+};
+
 // Read a checked-in wrangler.jsonc and make it usable as an *inline* harness config.
 //
 // A worker whose `main` is generated (capnweb-validate) needs `build.cwd` pinned to its own directory
@@ -92,6 +104,7 @@ function readWorkerConfig(dir: string): WorkerConfig {
 
 function workshopConfig(
     gatekeepers: { binding: string; name: string }[],
+    services: { binding: string; name: string; entrypoint?: string }[],
     enableGadgetExecution: boolean,
     patch?: (config: WorkerConfig) => void): WorkerConfig {
   const config = readWorkerConfig(WORKSHOP_DIR);
@@ -102,11 +115,18 @@ function workshopConfig(
   // The checked-in config declares no services; run-dev-server.ts adds one per gatekeeper. We add
   // only the ones the suite asked for, so buildGatekeeperVendorMap() discovers exactly those vendors
   // and the observer-config prompt has no surprise rows.
-  config.services = gatekeepers.map(gk => ({
-    binding: `GATEKEEPER_${gk.binding}`,
-    service: gk.name,
-    entrypoint: "GatekeeperVendor",
-  }));
+  config.services = [
+    ...gatekeepers.map(gk => ({
+      binding: `GATEKEEPER_${gk.binding}`,
+      service: gk.name,
+      entrypoint: "GatekeeperVendor",
+    })),
+    ...services.map(svc => ({
+      binding: svc.binding,
+      service: svc.name,
+      ...(svc.entrypoint === undefined ? {} : { entrypoint: svc.entrypoint }),
+    })),
+  ];
 
   // No CF_ACCESS_AUD, so /api takes the unauthenticated path and password signup is available.
   config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME] };
@@ -138,6 +158,8 @@ export type Harness = {
 
 export async function startHarness(opts: {
   gatekeepers: GatekeeperSpec[];
+  /** Extra Workers to boot and bind to the Workshop under their own binding names. */
+  services?: ServiceSpec[];
   patchWorkshop?: (config: WorkerConfig) => void;
   enableGadgetExecution?: boolean;
   /** Defaults to this repo's root. Override when a gatekeeper lives outside it. */
@@ -150,14 +172,20 @@ export async function startHarness(opts: {
     gk.patch?.(config);
     return { binding: gk.binding, name: config.name, config };
   });
+  const services = (opts.services ?? []).map(svc => {
+    const config = readWorkerConfig(svc.dir);
+    svc.patch?.(config);
+    return { binding: svc.binding, name: config.name, entrypoint: svc.entrypoint, config };
+  });
 
   const server = createTestHarness({
     root: opts.root ?? REPO_ROOT,
     // workshop-backend is primary, so unrouted requests (e.g. /api) go to it.
     workers: [
-      { config: workshopConfig(gatekeepers, opts.enableGadgetExecution ?? false,
+      { config: workshopConfig(gatekeepers, services, opts.enableGadgetExecution ?? false,
           opts.patchWorkshop) },
       ...gatekeepers.map(({ config }) => ({ config })),
+      ...services.map(({ config }) => ({ config })),
     ],
   });
 
