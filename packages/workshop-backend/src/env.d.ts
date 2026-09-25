@@ -45,6 +45,12 @@ declare global {
       >;
       FRONTEND_ERROR_RATE_LIMITER?: RateLimit;
 
+      // Optional Tenant membership policy for deployments hosting several organizations. When
+      // absent, every user belongs to one Tenant (see getTenantPolicy in tenant-policy.ts).
+      TENANT_POLICY?: Service<
+        import("@gadgets/workshop-shared/tenant-policy").TenantPolicyEntrypoint
+      >;
+
       // The Browser Run binding (BROWSER) used to render Gadget exports is intentionally NOT
       // redeclared here: wrangler's generated types make it required, and TypeScript 7 rejects
       // weakening it to optional in a merged augmentation. Self-hosted deployments may omit the
