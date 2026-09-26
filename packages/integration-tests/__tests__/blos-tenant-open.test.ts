@@ -77,7 +77,8 @@ async function expectOpenDenied(
 }
 
 /** Open as `username` in a fresh session and return the Gadget's metadata role. */
-async function openAs(username: string, workspaceId: string, shareKey?: string): Promise<string> {
+async function openAs(
+    username: string, workspaceId: string, shareKey?: string): Promise<string | undefined> {
   using publicApi = connect(requireHarness().url);
   using user = await logIn(publicApi, username);
   using opened = await user.openGadget(workspaceId, shareKey);
