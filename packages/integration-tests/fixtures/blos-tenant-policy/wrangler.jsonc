@@ -2,9 +2,17 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "blos-tenant-policy",
 
-  // Test double for a deployment's TENANT_POLICY binding: stateless, no storage, no RPC validation
-  // build. The Workshop reaches it through the harness's `services` option.
+  // Test double for a deployment's TENANT_POLICY binding: no RPC validation build. The Workshop
+  // reaches it through the harness's `services` option.
   "main": "src/blos-tenant-policy.ts",
 
-  "compatibility_date": "2026-09-04"
+  "compatibility_date": "2026-09-04",
+
+  // Per-user Tenant overrides, so a test can move a user to another Tenant.
+  "durable_objects": {
+    "bindings": [{ "name": "OVERRIDES", "class_name": "TenantOverrides" }]
+  },
+  "migrations": [
+    { "tag": "v0", "new_sqlite_classes": ["TenantOverrides"] }
+  ]
 }

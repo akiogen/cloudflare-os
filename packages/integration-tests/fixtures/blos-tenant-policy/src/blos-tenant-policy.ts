@@ -2,9 +2,12 @@
 //
 // The Tenant is read from the username so tests need no setup: `ta…` is Tenant A, `tb…` is Tenant
 // B, and anything else is the default Tenant. Pair it with nextUsernames("taowner", "tbguest").
+// `POST /assign?user=<id>&tenant=<tenant>` overrides one user's Tenant, to simulate a move.
 
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { TenantPolicy } from "@gadgets/workshop-shared/tenant-policy";
+
+type Env = { OVERRIDES: DurableObjectNamespace<TenantOverrides> };
 
 // Module exports of a Worker must be handlers, so these stay module-private.
 const TENANT_A = "tenant-a";
@@ -17,22 +20,46 @@ function tenantForUsername(userId: string): string {
   return DEFAULT_TENANT;
 }
 
-export default class BlosTenantPolicy extends WorkerEntrypoint implements TenantPolicy {
+/** One instance holds every override; tests are few and small. */
+export class TenantOverrides extends DurableObject<Env> {
+  assign(userId: string, tenant: string): void {
+    this.ctx.storage.kv.put(userId, tenant);
+  }
+
+  get(userId: string): string | undefined {
+    return this.ctx.storage.kv.get<string>(userId);
+  }
+}
+
+export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements TenantPolicy {
+  #overrides(): DurableObjectStub<TenantOverrides> {
+    return this.env.OVERRIDES.getByName("");
+  }
+
   async tenantOf(userId: string): Promise<string> {
-    return tenantForUsername(userId);
+    return (await this.#overrides().get(userId)) ?? tenantForUsername(userId);
   }
 
   async sameTenant(a: string, b: string): Promise<boolean> {
-    return tenantForUsername(a) === tenantForUsername(b);
+    const [tenantA, tenantB] = await Promise.all([this.tenantOf(a), this.tenantOf(b)]);
+    return tenantA === tenantB;
   }
 
   async onUserCreated(_userId: string): Promise<void> {}
 
-  /** `GET /tenant-of?user=<id>`, so tests can check the mapping without going through the Workshop. */
+  /** `GET /tenant-of?user=<id>` and `POST /assign?user=<id>&tenant=<tenant>` for tests. */
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const user = url.searchParams.get("user");
-    if (url.pathname !== "/tenant-of" || user === null) return new Response(null, { status: 404 });
-    return Response.json({ tenant: tenantForUsername(user) });
+    if (user === null) return new Response(null, { status: 404 });
+    if (url.pathname === "/tenant-of" && request.method === "GET") {
+      return Response.json({ tenant: await this.tenantOf(user) });
+    }
+    const tenant = url.searchParams.get("tenant");
+    if (url.pathname === "/assign" && request.method === "POST" && tenant !== null) {
+      await this.#overrides().assign(user, tenant);
+      return new Response(null, { status: 204 });
+    }
+    return new Response(null, { status: 404 });
   }
 }

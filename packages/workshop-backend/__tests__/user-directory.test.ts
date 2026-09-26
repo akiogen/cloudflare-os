@@ -51,6 +51,24 @@ describe("UserDirectoryDurableObject", { timeout: 30_000 }, () => {
     ]);
   });
 
+  it("removes a user's record and leaves others in place", async () => {
+    const stub = directory("remove");
+    await stub.syncUser(user("ada@example.com", "Ada Lovelace"), 0);
+    await stub.syncUser(user("grace@example.com", "Grace Hopper"), 0);
+
+    await stub.removeUser("ada@example.com");
+    await stub.removeUser("missing@example.com");
+    await expect(stub.searchUsers("example.com", [])).resolves.toEqual([
+      user("grace@example.com", "Grace Hopper"),
+    ]);
+
+    // A later sync (for example, moving back to this Tenant) re-adds the record.
+    await stub.syncUser(user("ada@example.com", "Ada Lovelace"), 0);
+    await expect(stub.searchUsers("ada@", [])).resolves.toEqual([
+      user("ada@example.com", "Ada Lovelace"),
+    ]);
+  });
+
   it("keeps the highest revision when syncs arrive out of order", async () => {
     const stub = directory("revision");
     await stub.syncUser(user("ada@example.com", "Newest"), 2);

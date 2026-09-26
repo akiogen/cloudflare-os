@@ -31,6 +31,7 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import { getTenantPolicy, userDirectoryName } from "./tenant-policy.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -146,8 +147,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   async searchUsers(query: string, excludeIds: string[]): Promise<UserDirectoryRecord[]> {
     if (!(await this.#userSearchEnabled())) return [];
-    return retryOnDoReset(() => this.ctx.exports.UserDirectoryDurableObject.getByName("")
-        .searchUsers(query, [this.#userId.name!, ...excludeIds]));
+    const caller = this.#userId.name!;
+    const policy = getTenantPolicy(this.env);
+    const directory = userDirectoryName(await policy.tenantOf(caller));
+    const results = await retryOnDoReset(() => this.ctx.exports.UserDirectoryDurableObject
+        .getByName(directory).searchUsers(query, [caller, ...excludeIds]));
+    // A user who moved Tenant stays in the old Tenant's directory until their next sign-in
+    // (UserDurableObject.#syncDirectory), so a bound policy re-checks every result.
+    if (!this.env.TENANT_POLICY) return results;
+    const sameTenant = await Promise.all(results.map(r => policy.sameTenant(caller, r.id)));
+    return results.filter((_, i) => sameTenant[i]);
   }
   changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
     return this.#user.changePassword(oldHash, newHash);

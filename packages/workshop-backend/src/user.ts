@@ -12,6 +12,8 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import { getTenantPolicy, userDirectoryName } from "./tenant-policy.js";
+import { SINGLE_TENANT_ID } from "@gadgets/workshop-shared/tenant-policy";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 
 const logger = createWorkshopLogger("workshop.user");
@@ -261,6 +263,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // (-1 = never, which also lazily backfills users created before the
       // directory existed). See #syncDirectory().
       directoryRev: -1,
+      // Tenant whose directory holds the synced record (null = never recorded, which means the
+      // single-Tenant directory). See #syncDirectory().
+      directoryTenant: <string | null>null,
     }
   });
 }
@@ -341,27 +346,42 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
-  // Mirrors the profile into the deployment-wide user directory. Best-effort
+  // Mirrors the profile into the user directory of the user's Tenant. Best-effort
   // and does not block the caller. The `syncUser` call opens this DO's input
   // gate, so a rename can start a second sync while one is in flight, and the
   // two can reach the directory in either order. Each sync carries its
   // `profileRev` and the directory keeps the highest, so no ordering is needed
   // here. The revision counter only increases, and a failed sync leaves it
   // behind so the next authentication retries.
+  //
+  // The Tenant is re-read from the Tenant policy on every call, so a user who
+  // moved Tenant is moved to the new Tenant's directory (and removed from the
+  // old one) on their next authentication even if the profile did not change.
   #syncDirectory(): void {
     const rev = this.storage.profileRev.get();
-    if (rev === this.storage.directoryRev.get()) return;
     const profile = this.storage.profile.get();
-    this.ctx.exports.UserDirectoryDurableObject.getByName("")
-        .syncUser({ id: profile.id, name: profile.name }, rev)
-        .then(() => {
-          if (rev > this.storage.directoryRev.get()) this.storage.directoryRev.put(rev);
-        }, (error: unknown) => {
-          logger.warn("failed to sync user directory record", {
-            event: "user.directory.sync.failed",
-            error,
-          });
-        });
+    this.#syncDirectoryRecord(profile.id, profile.name, rev).catch((error: unknown) => {
+      logger.warn("failed to sync user directory record", {
+        event: "user.directory.sync.failed",
+        error,
+      });
+    });
+  }
+
+  async #syncDirectoryRecord(id: string, name: string, rev: number): Promise<void> {
+    const tenant = await getTenantPolicy(this.env).tenantOf(id);
+    const recordedTenant = this.storage.directoryTenant.get();
+    const directory = userDirectoryName(tenant);
+    const previous = userDirectoryName(recordedTenant ?? SINGLE_TENANT_ID);
+    if (directory === previous && rev === this.storage.directoryRev.get()) {
+      if (recordedTenant !== tenant) this.storage.directoryTenant.put(tenant);
+      return;
+    }
+    const directories = this.ctx.exports.UserDirectoryDurableObject;
+    if (directory !== previous) await directories.getByName(previous).removeUser(id);
+    await directories.getByName(directory).syncUser({ id, name }, rev);
+    if (rev > this.storage.directoryRev.get()) this.storage.directoryRev.put(rev);
+    this.storage.directoryTenant.put(tenant);
   }
 
   async authenticate(token: string): Promise<void> {
