@@ -346,6 +346,30 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
+  // Creates the account at most once (ADR-0006): the Tenant policy assigns the user a Tenant, then
+  // `write` marks the account created. Input stays blocked for the whole step, so a concurrent
+  // creation of the same account cannot pass the `created` check while the policy call is in
+  // flight. If the policy throws, nothing is written and the creation can be retried. `write` must
+  // not await. Without a Tenant policy the call is a no-op and behavior is unchanged.
+  //
+  // A throw inside blockConcurrencyWhile breaks the input gate and resets the whole DO, so a policy
+  // failure is carried out of the block and rethrown there instead.
+  async #createOnce(userId: string, write: () => void): Promise<boolean> {
+    const outcome = await this.ctx.blockConcurrencyWhile(
+        async (): Promise<{ created: boolean } | { error: unknown }> => {
+      if (this.storage.created.get()) return { created: false };
+      try {
+        await getTenantPolicy(this.env).onUserCreated(userId);
+      } catch (error) {
+        return { error };
+      }
+      write();
+      return { created: true };
+    });
+    if ("error" in outcome) throw outcome.error;
+    return outcome.created;
+  }
+
   // Mirrors the profile into the user directory of the user's Tenant. Best-effort
   // and does not block the caller. The `syncUser` call opens this DO's input
   // gate, so a rename can start a second sync while one is in flight, and the
@@ -408,17 +432,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * existing users can still sign in.
    */
   async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
-    const isNew = !this.storage.created.get();
+    let isNew = !this.storage.created.get();
     if (isNew) {
       if (!allowCreate) {
         throw new Error("New sign-ups are currently disabled on this deployment.");
       }
       // Create on first use.
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
+      isNew = await this.#createOnce(email, () => {
+        this.storage.created.put(true);
+        this.storage.profile.put({
+          type: "user",
+          name: email.split("@")[0],
+          id: email,
+        });
       });
     }
     this.#syncDirectory();
@@ -452,29 +478,33 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       return null;
     }
 
-    // Do a little migration here for old data.
-    // TODO(soon): Delete this.
-    for (let gadget of Array.from(this.storage.gadgets.list())) {
-      if (!gadget.created || !gadget.lastActive) {
-        if (!gadget.created) {
-          gadget.created = new Date("2026-01-01");
-        }
-        if (!gadget.lastActive) {
-          gadget.lastActive = new Date("2026-01-01");;
-        }
-        this.storage.gadgets.put(gadget);
-      }
-    }
-
-    this.storage.created.put(true);
-    this.storage.profile.put({
-      type: "user",
-      name: displayName,
-      id: username,
-    });
-
+    // Hashed before #createOnce, whose write must not await.
     let passwordHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', passwordHash));
-    this.storage.passwordHashHash.put(passwordHashHash);
+
+    let created = await this.#createOnce(username, () => {
+      // Do a little migration here for old data.
+      // TODO(soon): Delete this.
+      for (let gadget of Array.from(this.storage.gadgets.list())) {
+        if (!gadget.created || !gadget.lastActive) {
+          if (!gadget.created) {
+            gadget.created = new Date("2026-01-01");
+          }
+          if (!gadget.lastActive) {
+            gadget.lastActive = new Date("2026-01-01");;
+          }
+          this.storage.gadgets.put(gadget);
+        }
+      }
+
+      this.storage.created.put(true);
+      this.storage.profile.put({
+        type: "user",
+        name: displayName,
+        id: username,
+      });
+      this.storage.passwordHashHash.put(passwordHashHash);
+    });
+    if (!created) return null;
 
     return this.#newSessionToken();
   }
@@ -496,11 +526,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
+      // A concurrent sign-in may have created it meanwhile; either way the account now exists.
+      await this.#createOnce(email, () => {
+        this.storage.created.put(true);
+        this.storage.profile.put({
+          type: "user",
+          name: email.split("@")[0],
+          id: email,
+        });
       });
     }
     return this.#newSessionToken();
