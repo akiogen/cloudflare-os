@@ -1,4 +1,5 @@
 import {
+  SINGLE_TENANT_ID,
   SINGLE_TENANT_POLICY,
   type TenantPolicy,
 } from "@gadgets/workshop-shared/tenant-policy";
@@ -14,4 +15,12 @@ export type TenantPolicyEnv = Readonly<{
  */
 export function getTenantPolicy(env: TenantPolicyEnv): TenantPolicy {
   return env.TENANT_POLICY ?? SINGLE_TENANT_POLICY;
+}
+
+/**
+ * Name of the user-directory Durable Object that holds `tenantId`'s users. The single Tenant keeps
+ * the original deployment-wide directory (""), so deployments without a policy see no change.
+ */
+export function userDirectoryName(tenantId: string): string {
+  return tenantId === SINGLE_TENANT_ID ? "" : `tenant:${tenantId}`;
 }

@@ -4,7 +4,7 @@ import {
   SINGLE_TENANT_POLICY,
   type TenantPolicy,
 } from "@gadgets/workshop-shared/tenant-policy";
-import { getTenantPolicy } from "../src/tenant-policy.js";
+import { getTenantPolicy, userDirectoryName } from "../src/tenant-policy.js";
 
 describe("getTenantPolicy", () => {
   it("falls back to the single-Tenant policy when TENANT_POLICY is not bound", () => {
@@ -30,5 +30,16 @@ describe("SINGLE_TENANT_POLICY", () => {
 
   it("does nothing when an account is created", async () => {
     await expect(SINGLE_TENANT_POLICY.onUserCreated("alice@example.com")).resolves.toBeUndefined();
+  });
+});
+
+describe("userDirectoryName", () => {
+  it("keeps the deployment-wide directory for the single Tenant", () => {
+    expect(userDirectoryName(SINGLE_TENANT_ID)).toBe("");
+  });
+
+  it("gives every other Tenant its own directory", () => {
+    expect(userDirectoryName("tenant-a")).toBe("tenant:tenant-a");
+    expect(userDirectoryName("tenant-b")).not.toBe(userDirectoryName("tenant-a"));
   });
 });
