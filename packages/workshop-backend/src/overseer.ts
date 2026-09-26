@@ -49,6 +49,7 @@ import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank }
     from "./sharing";
+import { getTenantPolicy } from "./tenant-policy";
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
@@ -12046,6 +12047,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let userDo = this.impl.users.get(userDoId);
     let profile = await userDo.whoamiIfExists();
     if (!profile) {
+      return null;
+    }
+
+    // Only users in the owner's Tenant can be added (ADR-0005 P3). Comparing against the owner, not
+    // the caller, keeps a collaborator from widening the Gadget's Tenant. Another Tenant's user gets
+    // the same `null` as a missing account, so the response does not reveal that they exist.
+    const owner = await this.impl.getOwnerProfileId();
+    if (!(await getTenantPolicy(this.impl.env).sameTenant(owner, profile.id))) {
       return null;
     }
 
