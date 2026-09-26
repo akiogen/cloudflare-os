@@ -93,6 +93,8 @@ export async function openFakeOverseer(
       // verification in one. The sharing manager is still reached, but only to redeem a share key,
       // which these tests never pass.
       authorizeCollaborator: async () => role,
+      // No Tenant policy: every caller is in the owner's Tenant (ADR-0005 P4 check in open()).
+      inOwnerTenant: async () => true,
       getSharingManager: async () => ({}),
       ctx: { id: { toString: () => "workspace-id" }, exports: opts.exports ?? {} },
       users: {

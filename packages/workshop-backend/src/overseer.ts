@@ -9347,6 +9347,9 @@ class OverseerImpl implements AgentHooks {
     let sharing = await this.getSharingManager();
     let role = sharing.getEffectiveRole(profileId);
     if (!role || (opts.requireRole && roleRank(role) < roleRank(opts.requireRole))) return null;
+    // A permission edge grants nothing across Tenants (ADR-0005 P4): an edge written before the
+    // collaborator moved Tenant, or before a Tenant policy was bound, is ignored.
+    if (!(await this.inOwnerTenant(profileId))) return null;
 
     // A session-to-be counts as a session for its role from the moment its role is resolved:
     // verification can park indefinitely on collaborator-controlled awaits (the account-
@@ -9613,6 +9616,13 @@ class OverseerImpl implements AgentHooks {
     return lines.join("\n");
   }
 
+  // Whether `profileId` belongs to the owner's Tenant (ADR-0005). Always true without a Tenant
+  // policy. Tenant moves happen outside this DO, so a session opened before a move is not severed;
+  // the next open() or authorization is refused.
+  async inOwnerTenant(profileId: string): Promise<boolean> {
+    return getTenantPolicy(this.env).sameTenant(await this.getOwnerProfileId(), profileId);
+  }
+
   // Get the owner's profile ID, using the in-memory cache when available. The owner's
   // profile ID never changes, so this is safe to cache for the lifetime of the DO instance.
   // The cache is populated eagerly when the owner calls open(), but if only collaborators
@@ -9874,6 +9884,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let role: CollaboratorRole = "build";
 
     if (!isOwner) {
+      // Another Tenant's user is refused before a share key is redeemed, so no permission edge is
+      // written for them (ADR-0005 P4). Same denial as having no access at all.
+      if (!(await this.impl.inOwnerTenant(profileId))) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      }
+
       let sharing = await this.impl.getSharingManager();
 
       // If a share key was provided, redeem it. The owner already has full access and should not
