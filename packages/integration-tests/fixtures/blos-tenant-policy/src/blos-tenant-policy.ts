@@ -5,9 +5,12 @@
 // `POST /assign?user=<id>&tenant=<tenant>` overrides one user's Tenant, to simulate a move.
 // `GET /created?user=<id>` counts onUserCreated calls, and `POST /fail?user=<id>` makes the next
 // onUserCreated for that user throw once.
+//
+// authorizeResource follows ADR-0009 with the Tenant ID as the mailbox handle: an email mailbox
+// name must be `<tenant>` or `<tenant>-<anything>`. Every other resource is allowed.
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import type { TenantPolicy } from "@gadgets/workshop-shared/tenant-policy";
+import type { ResourceAuthorization, TenantPolicy } from "@gadgets/workshop-shared/tenant-policy";
 
 type Env = { OVERRIDES: DurableObjectNamespace<TenantOverrides> };
 
@@ -66,6 +69,16 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
 
   async onUserCreated(userId: string): Promise<void> {
     await this.#overrides().userCreated(userId);
+  }
+
+  async authorizeResource(userId: string, vendorId: string, resourceUrl: string)
+      : Promise<ResourceAuthorization> {
+    if (vendorId.toLowerCase() !== "email") return { allowed: true };
+    const handle = await this.tenantOf(userId);
+    const at = resourceUrl.lastIndexOf("/mailbox/");
+    const name = at < 0 ? "" : decodeURIComponent(resourceUrl.slice(at + "/mailbox/".length));
+    if (name === handle || name.startsWith(`${handle}-`)) return { allowed: true };
+    return { allowed: false, message: `Mailbox names on this deployment start with "${handle}".` };
   }
 
   /** Test control routes; see the header comment. */
