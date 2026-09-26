@@ -3,6 +3,8 @@
 // The Tenant is read from the username so tests need no setup: `ta…` is Tenant A, `tb…` is Tenant
 // B, and anything else is the default Tenant. Pair it with nextUsernames("taowner", "tbguest").
 // `POST /assign?user=<id>&tenant=<tenant>` overrides one user's Tenant, to simulate a move.
+// `GET /created?user=<id>` counts onUserCreated calls, and `POST /fail?user=<id>` makes the next
+// onUserCreated for that user throw once.
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { TenantPolicy } from "@gadgets/workshop-shared/tenant-policy";
@@ -20,14 +22,31 @@ function tenantForUsername(userId: string): string {
   return DEFAULT_TENANT;
 }
 
-/** One instance holds every override; tests are few and small. */
+/** One instance holds every override and counter; tests are few and small. */
 export class TenantOverrides extends DurableObject<Env> {
   assign(userId: string, tenant: string): void {
-    this.ctx.storage.kv.put(userId, tenant);
+    this.ctx.storage.kv.put(`tenant:${userId}`, tenant);
   }
 
   get(userId: string): string | undefined {
-    return this.ctx.storage.kv.get<string>(userId);
+    return this.ctx.storage.kv.get<string>(`tenant:${userId}`);
+  }
+
+  failNext(userId: string): void {
+    this.ctx.storage.kv.put(`fail:${userId}`, true);
+  }
+
+  /** Records one onUserCreated call; throws (without counting) when a failure was requested. */
+  userCreated(userId: string): void {
+    if (this.ctx.storage.kv.get<boolean>(`fail:${userId}`)) {
+      this.ctx.storage.kv.delete(`fail:${userId}`);
+      throw new Error(`Tenant policy failure requested for ${userId}`);
+    }
+    this.ctx.storage.kv.put(`created:${userId}`, this.createdCount(userId) + 1);
+  }
+
+  createdCount(userId: string): number {
+    return this.ctx.storage.kv.get<number>(`created:${userId}`) ?? 0;
   }
 }
 
@@ -45,15 +64,24 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
     return tenantA === tenantB;
   }
 
-  async onUserCreated(_userId: string): Promise<void> {}
+  async onUserCreated(userId: string): Promise<void> {
+    await this.#overrides().userCreated(userId);
+  }
 
-  /** `GET /tenant-of?user=<id>` and `POST /assign?user=<id>&tenant=<tenant>` for tests. */
+  /** Test control routes; see the header comment. */
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const user = url.searchParams.get("user");
     if (user === null) return new Response(null, { status: 404 });
     if (url.pathname === "/tenant-of" && request.method === "GET") {
       return Response.json({ tenant: await this.tenantOf(user) });
+    }
+    if (url.pathname === "/created" && request.method === "GET") {
+      return Response.json({ count: await this.#overrides().createdCount(user) });
+    }
+    if (url.pathname === "/fail" && request.method === "POST") {
+      await this.#overrides().failNext(user);
+      return new Response(null, { status: 204 });
     }
     const tenant = url.searchParams.get("tenant");
     if (url.pathname === "/assign" && request.method === "POST" && tenant !== null) {
