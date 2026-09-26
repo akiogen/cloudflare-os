@@ -106,7 +106,7 @@ it("connects an email account and creates a mailbox gatekeeper", async () => {
     (await listConnectedAccounts(user)).find(a => a.vendorId === "email") ?? null);
 
   using workspace = await user.newGadget();
-  const mailbox = `inq${name}`;
+  const mailbox = `tenant-a-inq${name}`;  // Under the fixture Tenant A handle (ADR-0009)
   using gatekeeper = await workspace.newGatekeeper(
       account.id, `http://localhost:8787/gatekeeper/email/mailbox/${mailbox}`);
   expect(gatekeeper).not.toBeNull();
@@ -175,7 +175,7 @@ describe.skipIf(!HAS_BLUEPRINT)("BLOS Inquiry Triage Gadget in the kernel", () =
     const [inq] = await gadgetsIn(workspace);
     if (!inq) throw new Error("No gadget was created");
 
-    const mailbox = `inq${name}`;
+    const mailbox = `tenant-a-inq${name}`;  // Under the fixture Tenant A handle (ADR-0009)
     using emailGk = await workspace.newGatekeeper(
         accountId, `http://localhost:8787/gatekeeper/email/mailbox/${mailbox}`);
     if (!emailGk) throw new Error("No email gatekeeper");

@@ -16,7 +16,17 @@ export interface TenantPolicy {
   sameTenant(a: string, b: string): Promise<boolean>;
   /** Called once after a new account is created, so the policy can assign it a Tenant. */
   onUserCreated(userId: string): Promise<void>;
+  /**
+   * Called before `resourceUrl` of the gatekeeper `vendorId` becomes a capability for `userId`,
+   * and before the gatekeeper is asked, so a denied resource is never claimed or created. A denial
+   * message must not reveal anything about other Tenants.
+   */
+  authorizeResource(userId: string, vendorId: string, resourceUrl: string)
+      : Promise<ResourceAuthorization>;
 }
+
+/** Outcome of `TenantPolicy.authorizeResource`. `message` is shown to the caller as is. */
+export type ResourceAuthorization = { allowed: true } | { allowed: false; message: string };
 
 /** Native Workers RPC capability a deployment binds as `TENANT_POLICY`. */
 export interface TenantPolicyEntrypoint extends WorkerEntrypoint, TenantPolicy {}
@@ -29,4 +39,6 @@ export const SINGLE_TENANT_POLICY: TenantPolicy = Object.freeze({
   tenantOf: async (_userId: string) => SINGLE_TENANT_ID,
   sameTenant: async (_a: string, _b: string) => true,
   onUserCreated: async (_userId: string) => {},
+  authorizeResource: async (_userId: string, _vendorId: string, _resourceUrl: string)
+      : Promise<ResourceAuthorization> => ({ allowed: true }),
 });

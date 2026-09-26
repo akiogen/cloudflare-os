@@ -1978,6 +1978,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
                   typeUrlPattern: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
+
+    // BLOS (ADR-0009, P6): the Tenant policy decides first, because asking the gatekeeper may
+    // already claim the resource (gatekeeper-email claims the mailbox name).
+    let authorization = await getTenantPolicy(this.env).authorizeResource(
+        this.storage.profile.get().id, account.vendorId, url);
+    if (!authorization.allowed) throw new Error(authorization.message);
+
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
 
     // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a
