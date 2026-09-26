@@ -1,0 +1,16 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "blos-email-sender",
+
+  // Test-only stand-in for Cloudflare Email Routing, which the test harness cannot dispatch: it hands
+  // a parsed IncomingEmail straight to gatekeeper-email's per-address Durable Object, the same call
+  // gatekeeper-email's email() handler makes after parsing. The binding reaches gatekeeper-email's
+  // class through script_name, as fixtures/gatekeeper-test reaches the Workshop's Overseer.
+  "main": "src/blos-email-sender.ts",
+  "compatibility_date": "2026-09-04",
+  "durable_objects": {
+    "bindings": [
+      { "name": "EMAIL_ADDRESS", "class_name": "EmailAddress", "script_name": "gatekeeper-email" }
+    ]
+  }
+}
