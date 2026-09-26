@@ -64,6 +64,18 @@ type Env = Cloudflare.Env & {
   // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
   // NOT include a trailing slash. Omit for localhost dev server.
   BASE_URL?: string,
+  // BLOS: the product name shown on this gatekeeper's pages (see productName).
+  PRODUCT_NAME?: string,
+}
+
+// BLOS (business-loop-os ADR-0011): the product name on this gatekeeper's own pages and in its
+// description. Unset, it stays "Cloudflare OS" as upstream.
+function productName(env: { PRODUCT_NAME?: string }): string {
+  return env.PRODUCT_NAME?.trim() || "Cloudflare OS";
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 }
 
 function getBaseUrl(env: Env) {
@@ -133,7 +145,7 @@ class EmailMailboxConfiguratorUI extends RpcTarget implements EmailMailboxConfig
 
 // =======================================================================================
 
-const INVALID_LINK_HTML = `<!DOCTYPE html>
+const invalidLinkHtml = (product: string) => `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8">
@@ -143,7 +155,7 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Authorization Link Expired</h1>
-      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to Cloudflare OS and try again.</p>
+      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to ${escapeHtml(product)} and try again.</p>
       <button onclick="window.close()" style="padding: 0.5rem 1.5rem; background: #d97706; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer;">Close</button>
     </div>
   </body>
@@ -168,7 +180,7 @@ export default {
       let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
       let handoff = await stub.complete(path[1]);
       if (!handoff) {
-        return new Response(INVALID_LINK_HTML, {
+        return new Response(invalidLinkHtml(productName(env)), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
@@ -257,7 +269,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       color: "#fff5df",
       tagline: "Trigger gadgets from incoming email",
       description:
-          "Give Cloudflare OS an email address it can receive messages from. Useful for triage " +
+          `Give ${productName(this.env)} an email address it can receive messages from. Useful for triage ` +
           "agents, ticket-from-email workflows, or anything driven by mail.",
     };
   }
