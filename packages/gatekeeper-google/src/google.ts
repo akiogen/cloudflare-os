@@ -158,11 +158,23 @@ type Env = Cloudflare.Env & GoogleOAuthEnv & {
   // OAuth app credentials (wrangler secrets / .dev.vars); not in wrangler.jsonc.
   CLIENT_ID?: string;
   CLIENT_SECRET?: string;
+  // BLOS: the product name shown on this gatekeeper's pages (see productName).
+  PRODUCT_NAME?: string;
+}
+
+// BLOS (business-loop-os ADR-0011): the product name on this gatekeeper's own pages and in its
+// description. Unset, it stays "Cloudflare OS" as upstream.
+function productName(env: { PRODUCT_NAME?: string }): string {
+  return env.PRODUCT_NAME?.trim() || "Cloudflare OS";
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 }
 
 // =======================================================================================
 
-const INVALID_LINK_HTML = `<!DOCTYPE html>
+const invalidLinkHtml = (product: string) => `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8">
@@ -172,13 +184,13 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Authorization Link Expired</h1>
-      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to Cloudflare OS and try again.</p>
+      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to ${escapeHtml(product)} and try again.</p>
       <button onclick="window.close()" style="padding: 0.5rem 1.5rem; background: #d97706; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer;">Close</button>
     </div>
   </body>
 </html>`;
 
-const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
+const notConfiguredHtml = (product: string) => `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8">
@@ -188,7 +200,7 @@ const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Google Gatekeeper Not Configured</h1>
-      <p style="color: #555; line-height: 1.6; margin: 0;">Please see the README.md for instructions on configuring an OAuth client ID and secret so that this Cloudflare OS instance can access Google APIs.</p>
+      <p style="color: #555; line-height: 1.6; margin: 0;">Please see the README.md for instructions on configuring an OAuth client ID and secret so that this ${escapeHtml(product)} instance can access Google APIs.</p>
     </div>
   </body>
 </html>`;
@@ -208,7 +220,7 @@ export default {
 
     if (path.length === 2 && path[0].length === 64 && path[1].length === NONCE_BYTES * 2) {
       if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
-        return new Response(NOT_CONFIGURED_HTML, {
+        return new Response(notConfiguredHtml(productName(env)), {
           headers: {
             "Content-Type": "text/html; charset=utf-8"
           }
@@ -232,7 +244,7 @@ export default {
       }
       const begun = await stub.beginOAuthFlow(initiationNonce, previewOAuth.redirectUri);
       if (begun === null) {
-        return new Response(INVALID_LINK_HTML, {
+        return new Response(invalidLinkHtml(productName(env)), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
@@ -288,7 +300,7 @@ export default {
       let error = url.searchParams.get("error");
       if (error) {
         if (!await stub.consumeOAuthNonce(oauthState.oauthNonce)) {
-          return new Response(INVALID_LINK_HTML, {
+          return new Response(invalidLinkHtml(productName(env)), {
             headers: { "Content-Type": "text/html; charset=utf-8" }
           });
         }
@@ -300,7 +312,7 @@ export default {
 
       let handoff = await stub.acceptAuthCode(code, oauthState.oauthNonce);
       if (!handoff) {
-        return new Response(INVALID_LINK_HTML, {
+        return new Response(invalidLinkHtml(productName(env)), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
@@ -328,7 +340,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       color: "#e8f0fe",
       tagline: "Draft replies, edit docs, read sheets, search Drive, manage calendars, and analyze data",
       description:
-          "Connect your Google account to give Cloudflare OS access to Gmail, Google Docs, Google " +
+          `Connect your Google account to give ${productName(this.env)} access to Gmail, Google Docs, Google ` +
           "Sheets, Google Drive, Google Calendar, and BigQuery. Build agents that triage email, " +
           "draft and edit documents, read spreadsheets, search Drive and read native Docs and " +
           "Sheets, find focus time, schedule meetings, or run analytics queries on your data.",
