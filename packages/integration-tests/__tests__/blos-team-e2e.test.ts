@@ -1,6 +1,6 @@
-// End to end with the real BLOS Tenant policy Worker (business-loop-os packages/blos-tenant-policy,
-// ADR-0007) bound as TENANT_POLICY: two Free sign-ups each get their own Tenant, and the kernel's
-// Tenant checks (ADR-0005 P2–P4) keep them apart.
+// End to end with the real BLOS Team policy Worker (business-loop-os packages/blos-team-policy,
+// ADR-0007) bound as TEAM_POLICY: two Free sign-ups each get their own Team, and the kernel's
+// Team checks (ADR-0005 P2–P4) keep them apart.
 //
 // The Worker lives in the business-loop-os repository, next to this submodule. It is present in
 // BLOS CI (Upstream verification) and absent in a standalone checkout of this fork, where the suite
@@ -18,7 +18,7 @@ import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, logIn, nextUsernames, signUp } from "../src/rpc-client.js";
 
-const BLOS_POLICY_DIR = resolve(import.meta.dirname, "../../../../packages/blos-tenant-policy");
+const BLOS_POLICY_DIR = resolve(import.meta.dirname, "../../../../packages/blos-team-policy");
 const HAS_BLOS_POLICY = existsSync(resolve(BLOS_POLICY_DIR, "wrangler.jsonc"));
 // Run the Worker on the kernel's runtime date rather than its own.
 const KERNEL_COMPATIBILITY_DATE = "2026-09-04";
@@ -41,7 +41,7 @@ async function expectOpenDenied(
   expect(getOpenGadgetErrorCode(denied)).toBe(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
 }
 
-describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Tenant policy", () => {
+describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Team policy", () => {
   let harness: Harness | undefined;
   const network = new NetworkInterceptor({ handlers: [mockChatCompletion("Test chat")] });
 
@@ -50,7 +50,7 @@ describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Tenant policy", () => {
     harness = await startHarness({
       gatekeepers: [],
       services: [{
-        binding: "TENANT_POLICY",
+        binding: "TEAM_POLICY",
         dir: BLOS_POLICY_DIR,
         patch: config => { config.compatibility_date = KERNEL_COMPATIBILITY_DATE; },
       }],
@@ -77,7 +77,7 @@ describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Tenant policy", () => {
     return harness;
   }
 
-  it("keeps two Free sign-ups in separate Tenants", async () => {
+  it("keeps two Free sign-ups in separate Teams", async () => {
     const [xName, yName] = nextUsernames("freex", "freey");
     if (!xName || !yName) throw new Error("Missing test username");
 
@@ -97,17 +97,17 @@ describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Tenant policy", () => {
       expect(await reopened.getMetadata()).toMatchObject({ id });
     }
 
-    // Directory (P2): a single-member Free Tenant has nobody else to find. The sync mechanics are
-    // covered by blos-tenant-directory.test.ts; here each user must see nothing of the other.
+    // Directory (P2): a single-member Free Team has nobody else to find. The sync mechanics are
+    // covered by blos-team-directory.test.ts; here each user must see nothing of the other.
     expect((await x.searchUsers(yName, [])).map(r => r.id)).toEqual([]);
     expect((await y.searchUsers(xName, [])).map(r => r.id)).toEqual([]);
 
     // Collaborators (P3): Y cannot be added, and looks exactly like a missing account.
-    expect(await workspace.addCollaborator(yName, "use", "cross-tenant")).toBeNull();
+    expect(await workspace.addCollaborator(yName, "use", "cross-team")).toBeNull();
     expect(await workspace.listCollaborators()).toEqual([]);
 
     // Share links and open (P4): X's link grants Y nothing and writes no edge.
-    const link = await workspace.createShareLink("use", "cross-tenant link");
+    const link = await workspace.createShareLink("use", "cross-team link");
     await expectOpenDenied(y, id, link.key);
     await expectOpenDenied(y, id);
     expect(await workspace.listCollaborators()).toEqual([]);

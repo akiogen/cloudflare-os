@@ -570,6 +570,12 @@ export interface AuthenticatedApi extends RpcTarget {
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
 
   /**
+   * BLOS ADR-0012 P9: for an administrator of the caller's Team, the Gadgets each member owns,
+   * departed members included. Empty for everyone else and on deployments without a Team policy.
+   */
+  listTeamGadgets(): Promise<TeamGadget[]>;
+
+  /**
    * List the outputs of all the user's workspaces. Used to display the Outputs page, which lets
    * the user find things they made without remembering which workspace they made them in.
    *
@@ -1456,6 +1462,11 @@ export type GadgetMetadata = {
 export type GadgetMetadataWithTimestamps = GadgetMetadata & {
   created: Date;
   lastActive: Date;
+}
+
+/** A Gadget listed by `AuthenticatedApi.listTeamGadgets`, with the member who owns it. */
+export type TeamGadget = GadgetMetadataWithTimestamps & {
+  ownerId: string;
 }
 
 /**

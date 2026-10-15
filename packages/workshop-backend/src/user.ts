@@ -12,8 +12,8 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
-import { getTenantPolicy, userDirectoryName } from "./tenant-policy.js";
-import { SINGLE_TENANT_ID } from "@gadgets/workshop-shared/tenant-policy";
+import { getTeamPolicy, userDirectoryName } from "./team-policy.js";
+import { SINGLE_TEAM_ID } from "@gadgets/workshop-shared/team-policy";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 
 const logger = createWorkshopLogger("workshop.user");
@@ -263,9 +263,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // (-1 = never, which also lazily backfills users created before the
       // directory existed). See #syncDirectory().
       directoryRev: -1,
-      // Tenant whose directory holds the synced record (null = never recorded, which means the
-      // single-Tenant directory). See #syncDirectory().
-      directoryTenant: <string | null>null,
+      // Team whose directory holds the synced record (null = never recorded, which means the
+      // single-Team directory). See #syncDirectory().
+      directoryTeam: <string | null>null,
     }
   });
 }
@@ -346,11 +346,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
-  // Creates the account at most once (ADR-0006): the Tenant policy assigns the user a Tenant, then
+  // Creates the account at most once (ADR-0006): the Team policy assigns the user a Team, then
   // `write` marks the account created. Input stays blocked for the whole step, so a concurrent
   // creation of the same account cannot pass the `created` check while the policy call is in
   // flight. If the policy throws, nothing is written and the creation can be retried. `write` must
-  // not await. Without a Tenant policy the call is a no-op and behavior is unchanged.
+  // not await. Without a Team policy the call is a no-op and behavior is unchanged.
   //
   // A throw inside blockConcurrencyWhile breaks the input gate and resets the whole DO, so a policy
   // failure is carried out of the block and rethrown there instead.
@@ -359,7 +359,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         async (): Promise<{ created: boolean } | { error: unknown }> => {
       if (this.storage.created.get()) return { created: false };
       try {
-        await getTenantPolicy(this.env).onUserCreated(userId);
+        await getTeamPolicy(this.env).onUserCreated(userId);
       } catch (error) {
         return { error };
       }
@@ -370,7 +370,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return outcome.created;
   }
 
-  // Mirrors the profile into the user directory of the user's Tenant. Best-effort
+  // Mirrors the profile into the user directory of the user's Team. Best-effort
   // and does not block the caller. The `syncUser` call opens this DO's input
   // gate, so a rename can start a second sync while one is in flight, and the
   // two can reach the directory in either order. Each sync carries its
@@ -378,8 +378,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // here. The revision counter only increases, and a failed sync leaves it
   // behind so the next authentication retries.
   //
-  // The Tenant is re-read from the Tenant policy on every call, so a user who
-  // moved Tenant is moved to the new Tenant's directory (and removed from the
+  // The Team is re-read from the Team policy on every call, so a user who
+  // moved Team is moved to the new Team's directory (and removed from the
   // old one) on their next authentication even if the profile did not change.
   #syncDirectory(): void {
     const rev = this.storage.profileRev.get();
@@ -393,19 +393,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async #syncDirectoryRecord(id: string, name: string, rev: number): Promise<void> {
-    const tenant = await getTenantPolicy(this.env).tenantOf(id);
-    const recordedTenant = this.storage.directoryTenant.get();
-    const directory = userDirectoryName(tenant);
-    const previous = userDirectoryName(recordedTenant ?? SINGLE_TENANT_ID);
+    const team = await getTeamPolicy(this.env).teamOf(id);
+    const recordedTeam = this.storage.directoryTeam.get();
+    const directory = userDirectoryName(team);
+    const previous = userDirectoryName(recordedTeam ?? SINGLE_TEAM_ID);
     if (directory === previous && rev === this.storage.directoryRev.get()) {
-      if (recordedTenant !== tenant) this.storage.directoryTenant.put(tenant);
+      if (recordedTeam !== team) this.storage.directoryTeam.put(team);
       return;
     }
     const directories = this.ctx.exports.UserDirectoryDurableObject;
     if (directory !== previous) await directories.getByName(previous).removeUser(id);
     await directories.getByName(directory).syncUser({ id, name }, rev);
     if (rev > this.storage.directoryRev.get()) this.storage.directoryRev.put(rev);
-    this.storage.directoryTenant.put(tenant);
+    this.storage.directoryTeam.put(team);
   }
 
   async authenticate(token: string): Promise<void> {
@@ -1979,9 +1979,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
 
-    // BLOS (ADR-0009, P6): the Tenant policy decides first, because asking the gatekeeper may
+    // BLOS (ADR-0009, P6): the Team policy decides first, because asking the gatekeeper may
     // already claim the resource (gatekeeper-email claims the mailbox name).
-    let authorization = await getTenantPolicy(this.env).authorizeResource(
+    let authorization = await getTeamPolicy(this.env).authorizeResource(
         this.storage.profile.get().id, account.vendorId, url);
     if (!authorization.allowed) throw new Error(authorization.message);
 

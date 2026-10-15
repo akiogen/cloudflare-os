@@ -1,4 +1,4 @@
-// business-loop-os ADR-0010 / #54: public Context collections are deployment-wide, so every Tenant
+// business-loop-os ADR-0010 / #54: public Context collections are deployment-wide, so every Team
 // reads them. Only admins (the Provider's ADMINS) may create or change one; a non-admin is refused
 // before any collection is touched, exactly as for a collection that does not exist.
 

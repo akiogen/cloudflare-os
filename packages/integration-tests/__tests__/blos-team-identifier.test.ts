@@ -1,12 +1,12 @@
 // business-loop-os INV-001 cases 3 and 4 (Critical Invariants §3):
 //
-// 3. A caller cannot select another Tenant. The Tenant is derived on the server from the verified
-//    user (ADR-0005, ADR-0006, ADR-0007); no Workshop endpoint takes a Tenant identifier, and the
-//    Tenant policy is reachable only over the Workshop's service binding, never over HTTP.
-//    (A Tenant-scoped name in a request, a mailbox handle, is covered by blos-tenant-mailbox.)
-// 4. Tenant B cannot observe Tenant A's state: A's Gadgets never appear in B's listings.
+// 3. A caller cannot select another Team. The Team is derived on the server from the verified
+//    user (ADR-0005, ADR-0006, ADR-0007); no Workshop endpoint takes a Team identifier, and the
+//    Team policy is reachable only over the Workshop's service binding, never over HTTP.
+//    (A Team-scoped name in a request, a mailbox handle, is covered by blos-team-mailbox.)
+// 4. Team B cannot observe Team A's state: A's Gadgets never appear in B's listings.
 //
-// The fixture policy puts `ta…` users in Tenant A and `tb…` users in Tenant B.
+// The fixture policy puts `ta…` users in Team A and `tb…` users in Team B.
 
 import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
@@ -17,7 +17,7 @@ import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, nextUsernames, signUp } from "../src/rpc-client.js";
 
-const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-tenant-policy");
+const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-team-policy");
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor({ handlers: [mockChatCompletion("Test chat")] });
@@ -26,7 +26,7 @@ beforeAll(async () => {
   network.install();
   harness = await startHarness({
     gatekeepers: [],
-    services: [{ binding: "TENANT_POLICY", dir: POLICY_DIR }],
+    services: [{ binding: "TEAM_POLICY", dir: POLICY_DIR }],
   });
 });
 
@@ -50,14 +50,14 @@ async function activate(workspace: RpcStub<Overseer>): Promise<string> {
   return id;
 }
 
-it("does not expose the Tenant policy over HTTP (INV-001 case 3)", async () => {
-  // The policy's own test routes (/assign, /tenant-of) would let a caller move or read Tenants; none
+it("does not expose the Team policy over HTTP (INV-001 case 3)", async () => {
+  // The policy's own test routes (/assign, /team-of) would let a caller move or read Teams; none
   // of them may be reachable through the Workshop, under any plausible path.
   for (const path of [
-    "/gatekeeper/tenant-policy/assign?user=x&tenant=tenant-a",
-    "/gatekeeper/TENANT_POLICY/tenant-of?user=x",
-    "/tenant-policy/assign?user=x&tenant=tenant-a",
-    "/assign?user=x&tenant=tenant-a",
+    "/gatekeeper/team-policy/assign?user=x&team=team-a",
+    "/gatekeeper/TEAM_POLICY/team-of?user=x",
+    "/team-policy/assign?user=x&team=team-a",
+    "/assign?user=x&team=team-a",
   ]) {
     const response = await fetch(new URL(path, requireHarness().url), { method: "POST" });
     expect(response.status, path).not.toBe(204);
@@ -65,7 +65,7 @@ it("does not expose the Tenant policy over HTTP (INV-001 case 3)", async () => {
   }
 });
 
-it("keeps Tenant A's Gadgets out of Tenant B's listings (INV-001 case 4)", async () => {
+it("keeps Team A's Gadgets out of Team B's listings (INV-001 case 4)", async () => {
   const [aName, bName] = nextUsernames("taowner", "tbviewer");
   if (!aName || !bName) throw new Error("Missing test username");
   using aPublic = connect(requireHarness().url);
@@ -78,6 +78,6 @@ it("keeps Tenant A's Gadgets out of Tenant B's listings (INV-001 case 4)", async
 
   // A sees its own Gadget (case 1) ...
   expect((await a.listGadgets()).map(g => g.id)).toContain(id);
-  // ... and B, in another Tenant, sees nothing of it.
+  // ... and B, in another Team, sees nothing of it.
   expect((await b.listGadgets()).map(g => g.id)).not.toContain(id);
 });

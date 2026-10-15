@@ -66,7 +66,7 @@ export type GatekeeperSpec = {
   patch?: (config: WorkerConfig) => void;
 };
 
-/** A non-gatekeeper Worker the Workshop reaches through a service binding, e.g. `TENANT_POLICY`. */
+/** A non-gatekeeper Worker the Workshop reaches through a service binding, e.g. `TEAM_POLICY`. */
 export type ServiceSpec = {
   /** Binding name on the Workshop, used verbatim. */
   binding: string;

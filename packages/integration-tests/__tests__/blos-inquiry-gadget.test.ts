@@ -42,7 +42,7 @@ const BLUEPRINT = HAS_BLUEPRINT
         .map(([filename, content]) => ({ filename, content }))
     : [];
 
-const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-tenant-policy");
+const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-team-policy");
 
 const DRAFT = { category: "delivery", draft: "Thank you for asking. The employee will confirm the date.",
                 usedEntryIds: [] };
@@ -69,7 +69,7 @@ beforeAll(async () => {
     gatekeepers: [{ binding: "EMAIL", dir: EMAIL_DIR, patch: config => { delete config.build; } }],
     services: [
       { binding: "BLOS_EMAIL_SENDER", dir: SENDER_DIR },
-      { binding: "TENANT_POLICY", dir: POLICY_DIR },
+      { binding: "TEAM_POLICY", dir: POLICY_DIR },
     ],
     enableGadgetExecution: true,
     // Account connections hand off to the Workshop's origin (connect-handoff.ts).
@@ -106,7 +106,7 @@ it("connects an email account and creates a mailbox gatekeeper", async () => {
     (await listConnectedAccounts(user)).find(a => a.vendorId === "email") ?? null);
 
   using workspace = await user.newGadget();
-  const mailbox = `tenant-a-inq${name}`;  // Under the fixture Tenant A handle (ADR-0009)
+  const mailbox = `team-a-inq${name}`;  // Under the fixture Team A handle (ADR-0009)
   using gatekeeper = await workspace.newGatekeeper(
       account.id, `http://localhost:8787/gatekeeper/email/mailbox/${mailbox}`);
   expect(gatekeeper).not.toBeNull();
@@ -175,7 +175,7 @@ describe.skipIf(!HAS_BLUEPRINT)("BLOS Inquiry Triage Gadget in the kernel", () =
     const [inq] = await gadgetsIn(workspace);
     if (!inq) throw new Error("No gadget was created");
 
-    const mailbox = `tenant-a-inq${name}`;  // Under the fixture Tenant A handle (ADR-0009)
+    const mailbox = `team-a-inq${name}`;  // Under the fixture Team A handle (ADR-0009)
     using emailGk = await workspace.newGatekeeper(
         accountId, `http://localhost:8787/gatekeeper/email/mailbox/${mailbox}`);
     if (!emailGk) throw new Error("No email gatekeeper");
@@ -205,13 +205,13 @@ describe.skipIf(!HAS_BLUEPRINT)("BLOS Inquiry Triage Gadget in the kernel", () =
     const observed = inquiries.find(i => !i.baseline);
     expect(observed).toMatchObject({ status: "drafted", draft: { category: "delivery" } });
 
-    // The inquiries live in the owner's Gadget: a user of another Tenant cannot open the workspace
+    // The inquiries live in the owner's Gadget: a user of another Team cannot open the workspace
     // (ADR-0005 P4), with or without a share link.
     const { id: workspaceId } = await workspace.getMetadata();
     const [outsider] = nextUsernames("tboutsider");
     using outsiderPublic = connect(requireHarness().url);
     using outsiderApi = await signUp(outsiderPublic, outsider!);
-    const link = await workspace.createShareLink("use", "cross-tenant");
+    const link = await workspace.createShareLink("use", "cross-team");
     for (const key of [undefined, link.key]) {
       let denied: unknown;
       try {

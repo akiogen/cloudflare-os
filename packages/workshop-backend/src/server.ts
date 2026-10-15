@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, TeamGadget, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -31,7 +31,7 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
-import { getTenantPolicy, userDirectoryName } from "./tenant-policy.js";
+import { getTeamPolicy, userDirectoryName } from "./team-policy.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -148,15 +148,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async searchUsers(query: string, excludeIds: string[]): Promise<UserDirectoryRecord[]> {
     if (!(await this.#userSearchEnabled())) return [];
     const caller = this.#userId.name!;
-    const policy = getTenantPolicy(this.env);
-    const directory = userDirectoryName(await policy.tenantOf(caller));
+    const policy = getTeamPolicy(this.env);
+    const directory = userDirectoryName(await policy.teamOf(caller));
     const results = await retryOnDoReset(() => this.ctx.exports.UserDirectoryDurableObject
         .getByName(directory).searchUsers(query, [caller, ...excludeIds]));
-    // A user who moved Tenant stays in the old Tenant's directory until their next sign-in
+    // A user who moved Team stays in the old Team's directory until their next sign-in
     // (UserDurableObject.#syncDirectory), so a bound policy re-checks every result.
-    if (!this.env.TENANT_POLICY) return results;
-    const sameTenant = await Promise.all(results.map(r => policy.sameTenant(caller, r.id)));
-    return results.filter((_, i) => sameTenant[i]);
+    if (!this.env.TEAM_POLICY) return results;
+    const sameTeam = await Promise.all(results.map(r => policy.sameTeam(caller, r.id)));
+    return results.filter((_, i) => sameTeam[i]);
   }
   changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
     return this.#user.changePassword(oldHash, newHash);
@@ -333,6 +333,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     return retryOnDoReset(() => this.#user.listGadgets());
+  }
+  async listTeamGadgets(): Promise<TeamGadget[]> {
+    // BLOS ADR-0012 P9: only a Team administrator gets a member list; everyone else, and every
+    // deployment without a Team policy, gets nothing.
+    const members = await getTeamPolicy(this.env).teamMembers(this.#userId.name!);
+    if (!members) return [];
+    const lists = await Promise.all(members.map(async ownerId => {
+      const gadgets = await retryOnDoReset(
+          () => this.users.get(this.users.idFromName(ownerId)).listGadgets());
+      // Own Gadgets only: a shared Gadget is listed under its owner.
+      return gadgets.filter(g => !g.owner).map(g => ({ ...g, ownerId }));
+    }));
+    return lists.flat();
   }
 
   listOutputs(): Promise<ListOutputsResult> {
@@ -741,6 +754,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     let userId = this.users.idFromName(split[0]);
     await this.users.get(userId).authenticate(split[1]);
+    // A departed member's sessions are refused (BLOS ADR-0012 P8).
+    if (!(await getTeamPolicy(this.env).allowSignIn(split[0]))) {
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
       user_id: userId.toString(),
@@ -755,6 +772,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     }
 
     let email = this.accessPayload.email as string;
+    // A departed member is refused before the account is touched (BLOS ADR-0012 P8).
+    if (!(await getTeamPolicy(this.env).allowSignIn(email))) {
+      throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
+    }
     let userId = this.users.idFromName(email);
     let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
     let accountCreated =

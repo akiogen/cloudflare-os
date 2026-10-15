@@ -1,9 +1,9 @@
-// ADR-0009 / business-loop-os#53 (P6) end to end, with the real BLOS Tenant policy Worker bound as
-// TENANT_POLICY and the real gatekeeper-email: each Free Tenant gets its own mailbox handle, may
+// ADR-0009 / business-loop-os#53 (P6) end to end, with the real BLOS Team policy Worker bound as
+// TEAM_POLICY and the real gatekeeper-email: each Free Team gets its own mailbox handle, may
 // bind only names under it, and a denied name is neither claimed nor revealed.
 //
 // The policy Worker lives in the business-loop-os repository, next to this submodule. The suite is
-// skipped in a standalone checkout of this fork (ADR-0007 Decision 3), like blos-tenant-e2e.
+// skipped in a standalone checkout of this fork (ADR-0007 Decision 3), like blos-team-e2e.
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -16,7 +16,7 @@ import {
   connect, listConnectedAccounts, nextUsernames, signUp, waitFor,
 } from "../src/rpc-client.js";
 
-const BLOS_POLICY_DIR = resolve(import.meta.dirname, "../../../../packages/blos-tenant-policy");
+const BLOS_POLICY_DIR = resolve(import.meta.dirname, "../../../../packages/blos-team-policy");
 const HAS_BLOS_POLICY = existsSync(resolve(BLOS_POLICY_DIR, "wrangler.jsonc"));
 // Run the Worker on the kernel's runtime date rather than its own.
 const KERNEL_COMPATIBILITY_DATE = "2026-09-04";
@@ -24,7 +24,7 @@ const EMAIL_DIR = resolve(import.meta.dirname, "../../gatekeeper-email");
 const MAILBOX_BASE = "http://localhost:8787/gatekeeper/email/mailbox/";
 const HANDLE_IN_MESSAGE = /start with "([a-z0-9]{10})"/;
 
-describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Tenant policy: mailbox names", () => {
+describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Team policy: mailbox names", () => {
   let harness: Harness | undefined;
   const network = new NetworkInterceptor({ handlers: [] });
 
@@ -34,7 +34,7 @@ describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Tenant policy: mailbox names", () =
       // Prebuilt by build:blos-email-gatekeeper; do not rebuild at boot.
       gatekeepers: [{ binding: "EMAIL", dir: EMAIL_DIR, patch: config => { delete config.build; } }],
       services: [{
-        binding: "TENANT_POLICY",
+        binding: "TEAM_POLICY",
         dir: BLOS_POLICY_DIR,
         patch: config => { config.compatibility_date = KERNEL_COMPATIBILITY_DATE; },
       }],
@@ -88,7 +88,7 @@ describe.skipIf(!HAS_BLOS_POLICY)("real BLOS Tenant policy: mailbox names", () =
     return handle;
   }
 
-  it("keeps each Free Tenant to names under its own handle", async () => {
+  it("keeps each Free Team to names under its own handle", async () => {
     const [xName, yName] = nextUsernames("mailx", "maily");
     if (!xName || !yName) throw new Error("Missing test username");
     using xPublic = connect(requireHarness().url);

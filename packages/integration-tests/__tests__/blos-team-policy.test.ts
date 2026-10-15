@@ -1,4 +1,4 @@
-// The TENANT_POLICY seam (workshop-shared/src/tenant-policy.ts): the Workshop boots and serves its
+// The TEAM_POLICY seam (workshop-shared/src/team-policy.ts): the Workshop boots and serves its
 // normal flows with a policy bound. The checks that act on the policy (directory, collaborators,
 // share links, open) arrive with their call sites; this suite is where they go.
 
@@ -9,8 +9,8 @@ import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, logIn, nextUsernames, signUp } from "../src/rpc-client.js";
 
-const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-tenant-policy");
-const POLICY_WORKER = "blos-tenant-policy";
+const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-team-policy");
+const POLICY_WORKER = "blos-team-policy";
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor({ handlers: [mockChatCompletion("Test chat")] });
@@ -19,7 +19,7 @@ beforeAll(async () => {
   network.install();
   harness = await startHarness({
     gatekeepers: [],
-    services: [{ binding: "TENANT_POLICY", dir: POLICY_DIR }],
+    services: [{ binding: "TEAM_POLICY", dir: POLICY_DIR }],
   });
 });
 
@@ -37,19 +37,19 @@ function requireHarness(): Harness {
   return harness;
 }
 
-async function tenantOf(user: string): Promise<string> {
+async function teamOf(user: string): Promise<string> {
   const response = await requireHarness().fetchWorker(
-      POLICY_WORKER, `http://policy/tenant-of?user=${encodeURIComponent(user)}`);
+      POLICY_WORKER, `http://policy/team-of?user=${encodeURIComponent(user)}`);
   expect(response.status).toBe(200);
-  return ((await response.json()) as { tenant: string }).tenant;
+  return ((await response.json()) as { team: string }).team;
 }
 
 it.concurrent("boots the bound policy Worker next to the Workshop", async () => {
   const [a, b, other] = nextUsernames("taowner", "tbguest", "someone");
   if (!a || !b || !other) throw new Error("Missing test username");
-  expect(await tenantOf(a)).toBe("tenant-a");
-  expect(await tenantOf(b)).toBe("tenant-b");
-  expect(await tenantOf(other)).toBe("default");
+  expect(await teamOf(a)).toBe("team-a");
+  expect(await teamOf(b)).toBe("team-b");
+  expect(await teamOf(other)).toBe("default");
 });
 
 it.concurrent("keeps sign-up, log-in and own Gadgets working with a policy bound", async () => {
