@@ -8,8 +8,8 @@ const MAX_EXCLUDE_IDS = 1000;
 
 /**
  * Directory of user profiles, so a user can find collaborators by name or id. There is one per
- * Tenant (`userDirectoryName` in tenant-policy.ts); without a Tenant policy that is a single
- * deployment-wide directory. Each user DO mirrors updates to its own profile into its Tenant's
+ * Team (`userDirectoryName` in team-policy.ts); without a Team policy that is a single
+ * deployment-wide directory. Each user DO mirrors updates to its own profile into its Team's
  * directory (`UserDurableObject.#syncDirectory`).
  */
 export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
@@ -37,7 +37,7 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       record.id, record.name, `${record.id}\n${record.name}`.toLowerCase(), rev);
   }
 
-  /** Remove one user's record, e.g. after the user moved to another Tenant's directory. */
+  /** Remove one user's record, e.g. after the user moved to another Team's directory. */
   removeUser(id: string): void {
     this.ctx.storage.sql.exec(`DELETE FROM users WHERE id = ?`, id);
   }

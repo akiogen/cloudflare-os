@@ -570,8 +570,8 @@ export interface AuthenticatedApi extends RpcTarget {
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
 
   /**
-   * BLOS ADR-0012 P9: for an administrator of the caller's Tenant, the Gadgets each member owns,
-   * departed members included. Empty for everyone else and on deployments without a Tenant policy.
+   * BLOS ADR-0012 P9: for an administrator of the caller's Team, the Gadgets each member owns,
+   * departed members included. Empty for everyone else and on deployments without a Team policy.
    */
   listTeamGadgets(): Promise<TeamGadget[]>;
 

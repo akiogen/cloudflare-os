@@ -49,7 +49,7 @@ import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank }
     from "./sharing";
-import { getTenantPolicy } from "./tenant-policy";
+import { getTeamPolicy } from "./team-policy";
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
@@ -9345,14 +9345,14 @@ class OverseerImpl implements AgentHooks {
         requireRole?: CollaboratorRole;
       } = {}): Promise<CollaboratorRole | null> {
     let sharing = await this.getSharingManager();
-    // Without a permission edge, a Tenant role may grant one (BLOS ADR-0012 P7). An existing edge
+    // Without a permission edge, a Team role may grant one (BLOS ADR-0012 P7). An existing edge
     // is never widened or narrowed by it.
     let role = sharing.getEffectiveRole(profileId)
-        ?? await getTenantPolicy(this.env).teamRole(await this.getOwnerProfileId(), profileId);
+        ?? await getTeamPolicy(this.env).teamRole(await this.getOwnerProfileId(), profileId);
     if (!role || (opts.requireRole && roleRank(role) < roleRank(opts.requireRole))) return null;
-    // A permission edge grants nothing across Tenants (ADR-0005 P4): an edge written before the
-    // collaborator moved Tenant, or before a Tenant policy was bound, is ignored.
-    if (!(await this.inOwnerTenant(profileId))) return null;
+    // A permission edge grants nothing across Teams (ADR-0005 P4): an edge written before the
+    // collaborator moved Team, or before a Team policy was bound, is ignored.
+    if (!(await this.inOwnerTeam(profileId))) return null;
 
     // A session-to-be counts as a session for its role from the moment its role is resolved:
     // verification can park indefinitely on collaborator-controlled awaits (the account-
@@ -9619,11 +9619,11 @@ class OverseerImpl implements AgentHooks {
     return lines.join("\n");
   }
 
-  // Whether `profileId` belongs to the owner's Tenant (ADR-0005). Always true without a Tenant
-  // policy. Tenant moves happen outside this DO, so a session opened before a move is not severed;
+  // Whether `profileId` belongs to the owner's Team (ADR-0005). Always true without a Team
+  // policy. Team moves happen outside this DO, so a session opened before a move is not severed;
   // the next open() or authorization is refused.
-  async inOwnerTenant(profileId: string): Promise<boolean> {
-    return getTenantPolicy(this.env).sameTenant(await this.getOwnerProfileId(), profileId);
+  async inOwnerTeam(profileId: string): Promise<boolean> {
+    return getTeamPolicy(this.env).sameTeam(await this.getOwnerProfileId(), profileId);
   }
 
   // Get the owner's profile ID, using the in-memory cache when available. The owner's
@@ -9887,9 +9887,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let role: CollaboratorRole = "build";
 
     if (!isOwner) {
-      // Another Tenant's user is refused before a share key is redeemed, so no permission edge is
+      // Another Team's user is refused before a share key is redeemed, so no permission edge is
       // written for them (ADR-0005 P4). Same denial as having no access at all.
-      if (!(await this.impl.inOwnerTenant(profileId))) {
+      if (!(await this.impl.inOwnerTeam(profileId))) {
         throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
       }
 
@@ -12069,11 +12069,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return null;
     }
 
-    // Only users in the owner's Tenant can be added (ADR-0005 P3). Comparing against the owner, not
-    // the caller, keeps a collaborator from widening the Gadget's Tenant. Another Tenant's user gets
+    // Only users in the owner's Team can be added (ADR-0005 P3). Comparing against the owner, not
+    // the caller, keeps a collaborator from widening the Gadget's Team. Another Team's user gets
     // the same `null` as a missing account, so the response does not reveal that they exist.
     const owner = await this.impl.getOwnerProfileId();
-    if (!(await getTenantPolicy(this.impl.env).sameTenant(owner, profile.id))) {
+    if (!(await getTeamPolicy(this.impl.env).sameTeam(owner, profile.id))) {
       return null;
     }
 

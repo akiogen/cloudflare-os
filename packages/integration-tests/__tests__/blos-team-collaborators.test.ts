@@ -1,7 +1,7 @@
-// ADR-0005 P3: only users in the Gadget owner's Tenant can be added as collaborators.
+// ADR-0005 P3: only users in the Gadget owner's Team can be added as collaborators.
 //
-// The fixture policy puts `ta…` users in Tenant A and `tb…` users in Tenant B, and can move a user
-// with POST /assign. Another Tenant's user must get exactly what a missing account gets: `null`.
+// The fixture policy puts `ta…` users in Team A and `tb…` users in Team B, and can move a user
+// with POST /assign. Another Team's user must get exactly what a missing account gets: `null`.
 
 import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
@@ -12,8 +12,8 @@ import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, nextUsernames, signUp } from "../src/rpc-client.js";
 
-const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-tenant-policy");
-const POLICY_WORKER = "blos-tenant-policy";
+const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-team-policy");
+const POLICY_WORKER = "blos-team-policy";
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor({ handlers: [mockChatCompletion("Test chat")] });
@@ -22,7 +22,7 @@ beforeAll(async () => {
   network.install();
   harness = await startHarness({
     gatekeepers: [],
-    services: [{ binding: "TENANT_POLICY", dir: POLICY_DIR }],
+    services: [{ binding: "TEAM_POLICY", dir: POLICY_DIR }],
   });
 });
 
@@ -54,14 +54,14 @@ async function activate(workspace: RpcStub<Overseer>): Promise<string> {
   return id;
 }
 
-async function moveToTenant(user: string, tenant: string): Promise<void> {
+async function moveToTeam(user: string, team: string): Promise<void> {
   const response = await requireHarness().fetchWorker(POLICY_WORKER,
-      `http://policy/assign?user=${encodeURIComponent(user)}&tenant=${encodeURIComponent(tenant)}`,
+      `http://policy/assign?user=${encodeURIComponent(user)}&team=${encodeURIComponent(team)}`,
       { method: "POST" });
   expect(response.status).toBe(204);
 }
 
-it.concurrent("refuses another Tenant's user exactly like a missing account", async () => {
+it.concurrent("refuses another Team's user exactly like a missing account", async () => {
   const [ownerName, outsiderName, missingName] = usernames("taowner", "tboutsider", "tamissing");
   using ownerPublic = connect(requireHarness().url);
   using outsiderPublic = connect(requireHarness().url);
@@ -70,14 +70,14 @@ it.concurrent("refuses another Tenant's user exactly like a missing account", as
   using workspace = await owner.newGadget();
   await activate(workspace);
 
-  const forOutsider = await workspace.addCollaborator(outsiderName!, "use", "cross-tenant");
+  const forOutsider = await workspace.addCollaborator(outsiderName!, "use", "cross-team");
   const forMissing = await workspace.addCollaborator(missingName!, "use", "missing");
   expect(forOutsider).toBeNull();
   expect(forOutsider).toEqual(forMissing);
   expect(await workspace.listCollaborators()).toEqual([]);
 });
 
-it.concurrent("adds a user of the owner's Tenant", async () => {
+it.concurrent("adds a user of the owner's Team", async () => {
   const [ownerName, colleagueName] = usernames("taowner", "tacolleague");
   using ownerPublic = connect(requireHarness().url);
   using colleaguePublic = connect(requireHarness().url);
@@ -86,14 +86,14 @@ it.concurrent("adds a user of the owner's Tenant", async () => {
   using workspace = await owner.newGadget();
   const id = await activate(workspace);
 
-  const added = await workspace.addCollaborator(colleagueName!, "use", "same tenant");
+  const added = await workspace.addCollaborator(colleagueName!, "use", "same team");
   expect(added).toMatchObject({ profile: { id: colleagueName }, role: "use" });
   using opened = await colleague.openGadget(id);
   expect(await opened.getMetadata()).toMatchObject({ id, role: "use" });
   await settleRestart();
 });
 
-it.concurrent("keeps a build collaborator from adding another Tenant's user", async () => {
+it.concurrent("keeps a build collaborator from adding another Team's user", async () => {
   const [ownerName, builderName, outsiderName] = usernames("taowner", "tabuilder", "tboutsider");
   using ownerPublic = connect(requireHarness().url);
   using builderPublic = connect(requireHarness().url);
@@ -111,7 +111,7 @@ it.concurrent("keeps a build collaborator from adding another Tenant's user", as
   await settleRestart();
 });
 
-it.concurrent("uses the Tenant a user moved to", async () => {
+it.concurrent("uses the Team a user moved to", async () => {
   const [ownerName, moverName] = usernames("taowner", "tamover");
   using ownerPublic = connect(requireHarness().url);
   using moverPublic = connect(requireHarness().url);
@@ -120,7 +120,7 @@ it.concurrent("uses the Tenant a user moved to", async () => {
   using workspace = await owner.newGadget();
   await activate(workspace);
 
-  await moveToTenant(moverName!, "tenant-b");
+  await moveToTeam(moverName!, "team-b");
   expect(await workspace.addCollaborator(moverName!, "use", "moved away")).toBeNull();
   expect(await workspace.listCollaborators()).toEqual([]);
 });

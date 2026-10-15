@@ -1,7 +1,7 @@
-// ADR-0005 P4: share links and Gadget opens never grant access across Tenants, even when a
+// ADR-0005 P4: share links and Gadget opens never grant access across Teams, even when a
 // permission edge exists.
 //
-// The fixture policy puts `ta…` users in Tenant A and `tb…` users in Tenant B, and can move a user
+// The fixture policy puts `ta…` users in Team A and `tb…` users in Team B, and can move a user
 // with POST /assign.
 
 import { resolve } from "node:path";
@@ -15,8 +15,8 @@ import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, logIn, nextUsernames, signUp } from "../src/rpc-client.js";
 
-const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-tenant-policy");
-const POLICY_WORKER = "blos-tenant-policy";
+const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-team-policy");
+const POLICY_WORKER = "blos-team-policy";
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor({ handlers: [mockChatCompletion("Test chat")] });
@@ -25,7 +25,7 @@ beforeAll(async () => {
   network.install();
   harness = await startHarness({
     gatekeepers: [],
-    services: [{ binding: "TENANT_POLICY", dir: POLICY_DIR }],
+    services: [{ binding: "TEAM_POLICY", dir: POLICY_DIR }],
   });
 });
 
@@ -57,9 +57,9 @@ async function activate(workspace: RpcStub<Overseer>): Promise<string> {
   return id;
 }
 
-async function moveToTenant(user: string, tenant: string): Promise<void> {
+async function moveToTeam(user: string, team: string): Promise<void> {
   const response = await requireHarness().fetchWorker(POLICY_WORKER,
-      `http://policy/assign?user=${encodeURIComponent(user)}&tenant=${encodeURIComponent(tenant)}`,
+      `http://policy/assign?user=${encodeURIComponent(user)}&team=${encodeURIComponent(team)}`,
       { method: "POST" });
   expect(response.status).toBe(204);
 }
@@ -85,7 +85,7 @@ async function openAs(
   return (await opened.getMetadata()).role;
 }
 
-it.concurrent("refuses another Tenant's share-link redemption and writes no edge", async () => {
+it.concurrent("refuses another Team's share-link redemption and writes no edge", async () => {
   const [ownerName, outsiderName] = usernames("taowner", "tboutsider");
   using ownerPublic = connect(requireHarness().url);
   using outsiderPublic = connect(requireHarness().url);
@@ -94,13 +94,13 @@ it.concurrent("refuses another Tenant's share-link redemption and writes no edge
   using workspace = await owner.newGadget();
   const id = await activate(workspace);
 
-  const link = await workspace.createShareLink("use", "cross-tenant link");
+  const link = await workspace.createShareLink("use", "cross-team link");
   await expectOpenDenied(outsider, id, link.key);
   await expectOpenDenied(outsider, id);
   expect(await workspace.listCollaborators()).toEqual([]);
 });
 
-it.concurrent("keeps share links working inside the owner's Tenant", async () => {
+it.concurrent("keeps share links working inside the owner's Team", async () => {
   const [ownerName, colleagueName] = usernames("taowner", "tacolleague");
   using ownerPublic = connect(requireHarness().url);
   using colleaguePublic = connect(requireHarness().url);
@@ -115,7 +115,7 @@ it.concurrent("keeps share links working inside the owner's Tenant", async () =>
   await settleRestart();
 });
 
-it.concurrent("ignores an existing edge once the collaborator is in another Tenant", async () => {
+it.concurrent("ignores an existing edge once the collaborator is in another Team", async () => {
   const [ownerName, moverName] = usernames("taowner", "tamover");
   using ownerPublic = connect(requireHarness().url);
   using moverPublic = connect(requireHarness().url);
@@ -127,8 +127,8 @@ it.concurrent("ignores an existing edge once the collaborator is in another Tena
   expect(await workspace.addCollaborator(moverName!, "use", "teammate")).not.toBeNull();
   expect(await openAs(moverName!, id)).toBe("use");
 
-  // The edge stays, but a Tenant change makes it grant nothing.
-  await moveToTenant(moverName!, "tenant-b");
+  // The edge stays, but a Team change makes it grant nothing.
+  await moveToTeam(moverName!, "team-b");
   {
     using publicApi = connect(requireHarness().url);
     using mover = await logIn(publicApi, moverName!);
@@ -136,8 +136,8 @@ it.concurrent("ignores an existing edge once the collaborator is in another Tena
   }
   expect((await workspace.listCollaborators()).map(c => c.profile.id)).toEqual([moverName]);
 
-  // Back in the owner's Tenant, the same edge grants access again.
-  await moveToTenant(moverName!, "tenant-a");
+  // Back in the owner's Team, the same edge grants access again.
+  await moveToTeam(moverName!, "team-a");
   expect(await openAs(moverName!, id)).toBe("use");
   await settleRestart();
 });

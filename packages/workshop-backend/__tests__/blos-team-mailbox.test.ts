@@ -1,14 +1,14 @@
-// ADR-0009 / business-loop-os#53 (P6): the Tenant policy authorizes a resource URL before the
+// ADR-0009 / business-loop-os#53 (P6): the Team policy authorizes a resource URL before the
 // gatekeeper is asked, so a denied mailbox name is never claimed. The mailbox rules themselves and
-// the cross-Tenant case with the real policy and gatekeeper-email are covered end to end in
-// integration-tests/__tests__/blos-tenant-mailbox.test.ts.
+// the cross-Team case with the real policy and gatekeeper-email are covered end to end in
+// integration-tests/__tests__/blos-team-mailbox.test.ts.
 
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import {
-  SINGLE_TENANT_POLICY, type ResourceAuthorization, type TenantPolicy,
-} from "@gadgets/workshop-shared/tenant-policy";
+  SINGLE_TEAM_POLICY, type ResourceAuthorization, type TeamPolicy,
+} from "@gadgets/workshop-shared/team-policy";
 import type { UserDurableObject } from "../src/user.js";
 
 declare module "cloudflare:workers" {
@@ -35,8 +35,8 @@ const REACHED = "reached the gatekeeper";
 /** A policy whose authorizeResource answers `answer` (or throws) and records its arguments. */
 function authorizingPolicy(answer: ResourceAuthorization | Error) {
   const calls: [string, string, string][] = [];
-  const policy: TenantPolicy = {
-    ...SINGLE_TENANT_POLICY,
+  const policy: TeamPolicy = {
+    ...SINGLE_TEAM_POLICY,
     authorizeResource: async (userId, vendorId, resourceUrl) => {
       calls.push([userId, vendorId, resourceUrl]);
       if (answer instanceof Error) throw answer;
@@ -52,13 +52,13 @@ let counter = 0;
  * Creates a user bound to `policy` with one connected "email" account whose gatekeeper records
  * each URL it is asked about (and then throws REACHED), and runs `f` inside the user DO.
  */
-function withAccount<T>(policy: TenantPolicy | undefined,
+function withAccount<T>(policy: TeamPolicy | undefined,
     f: (user: UserInternals, asked: string[]) => Promise<T>): Promise<T> {
-  const stub = env.TEST_USER.getByName(`blos-tenant-mailbox-${++counter}`);
+  const stub = env.TEST_USER.getByName(`blos-team-mailbox-${++counter}`);
   return runInDurableObject(stub, async (instance: UserDurableObject) => {
     const user = instance as UserInternals;
     await user.loginOrCreateViaGatekeeper(EMAIL, true);
-    if (policy) user.env = { ...user.env, TENANT_POLICY: policy } as unknown as Cloudflare.Env;
+    if (policy) user.env = { ...user.env, TEAM_POLICY: policy } as unknown as Cloudflare.Env;
     const asked: string[] = [];
     const account: FakeAccount = {
       id: 1,
@@ -102,7 +102,7 @@ describe("resource authorization before the gatekeeper", () => {
     });
   });
 
-  it("allows every resource without a TENANT_POLICY binding", async () => {
+  it("allows every resource without a TEAM_POLICY binding", async () => {
     await withAccount(undefined, async (user, asked) => {
       await expect(user.getGatekeeperClassFor(1, MAILBOX_URL)).rejects.toThrow(REACHED);
       expect(asked).toEqual([MAILBOX_URL]);

@@ -1,7 +1,7 @@
-// ADR-0006 / business-loop-os#47: account creation calls TenantPolicy.onUserCreated before the
+// ADR-0006 / business-loop-os#47: account creation calls TeamPolicy.onUserCreated before the
 // account exists, fails closed when the policy fails, and stays at-most-once under concurrency.
 // Password sign-up is the creation path the harness drives; the gatekeeper and Cloudflare Access
-// paths are covered by workshop-backend/__tests__/blos-tenant-signup.test.ts.
+// paths are covered by workshop-backend/__tests__/blos-team-signup.test.ts.
 
 import { resolve } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
@@ -9,8 +9,8 @@ import { type Harness, startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, logIn, nextUsernames, signUp } from "../src/rpc-client.js";
 
-const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-tenant-policy");
-const POLICY_WORKER = "blos-tenant-policy";
+const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-team-policy");
+const POLICY_WORKER = "blos-team-policy";
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor({ handlers: [] });
@@ -19,7 +19,7 @@ beforeAll(async () => {
   network.install();
   harness = await startHarness({
     gatekeepers: [],
-    services: [{ binding: "TENANT_POLICY", dir: POLICY_DIR }],
+    services: [{ binding: "TEAM_POLICY", dir: POLICY_DIR }],
   });
 });
 
@@ -60,7 +60,7 @@ async function logInAs(username: string): Promise<void> {
   using _user = await logIn(publicApi, username);
 }
 
-it.concurrent("assigns a Tenant once at sign-up and not on later log-ins", async () => {
+it.concurrent("assigns a Team once at sign-up and not on later log-ins", async () => {
   const [username] = nextUsernames("tasignup");
   if (!username) throw new Error("Missing test username");
 
@@ -71,7 +71,7 @@ it.concurrent("assigns a Tenant once at sign-up and not on later log-ins", async
   expect(await createdCount(username)).toBe(1);
 });
 
-it.concurrent("creates no account when the Tenant policy fails, and allows a retry", async () => {
+it.concurrent("creates no account when the Team policy fails, and allows a retry", async () => {
   const [username] = nextUsernames("tafailing");
   if (!username) throw new Error("Missing test username");
 

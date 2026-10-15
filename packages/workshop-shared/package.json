@@ -35,9 +35,9 @@
       "types": "./src/theme.ts",
       "import": "./src/theme.ts"
     },
-    "./tenant-policy": {
-      "types": "./src/tenant-policy.ts",
-      "import": "./src/tenant-policy.ts"
+    "./team-policy": {
+      "types": "./src/team-policy.ts",
+      "import": "./src/team-policy.ts"
     }
   },
   "scripts": {

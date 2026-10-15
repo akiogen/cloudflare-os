@@ -1,11 +1,11 @@
 // ADR-0006 / business-loop-os#47: the gatekeeper sign-in and Cloudflare Access creation paths call
-// TenantPolicy.onUserCreated before the account exists, and fail closed when it throws. (The
-// password path is covered end to end in integration-tests/__tests__/blos-tenant-signup.test.ts.)
+// TeamPolicy.onUserCreated before the account exists, and fail closed when it throws. (The
+// password path is covered end to end in integration-tests/__tests__/blos-team-signup.test.ts.)
 
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import type { TenantPolicy } from "@gadgets/workshop-shared/tenant-policy";
+import type { TeamPolicy } from "@gadgets/workshop-shared/team-policy";
 import type { UserDurableObject } from "../src/user.js";
 
 declare module "cloudflare:workers" {
@@ -23,9 +23,9 @@ type UserInternals = UserDurableObject & {
 function recordingPolicy() {
   const created: string[] = [];
   const state = { failing: false };
-  const policy: TenantPolicy = {
-    tenantOf: async () => "tenant-x",
-    sameTenant: async () => true,
+  const policy: TeamPolicy = {
+    teamOf: async () => "team-x",
+    sameTeam: async () => true,
     onUserCreated: async (userId) => {
       if (state.failing) throw new Error("policy unavailable");
       created.push(userId);
@@ -36,12 +36,12 @@ function recordingPolicy() {
 
 let counter = 0;
 
-/** Runs `f` inside a fresh user DO whose env binds `policy` as TENANT_POLICY. */
-function withPolicy<T>(policy: TenantPolicy, f: (user: UserInternals) => Promise<T>): Promise<T> {
-  const stub = env.TEST_USER.getByName(`blos-tenant-signup-${++counter}`);
+/** Runs `f` inside a fresh user DO whose env binds `policy` as TEAM_POLICY. */
+function withPolicy<T>(policy: TeamPolicy, f: (user: UserInternals) => Promise<T>): Promise<T> {
+  const stub = env.TEST_USER.getByName(`blos-team-signup-${++counter}`);
   return runInDurableObject(stub, (instance: UserDurableObject) => {
     const user = instance as UserInternals;
-    user.env = { ...user.env, TENANT_POLICY: policy } as unknown as Cloudflare.Env;
+    user.env = { ...user.env, TEAM_POLICY: policy } as unknown as Cloudflare.Env;
     return f(user);
   });
 }
@@ -49,7 +49,7 @@ function withPolicy<T>(policy: TenantPolicy, f: (user: UserInternals) => Promise
 const EMAIL = "new.user@example.com";
 
 describe("gatekeeper sign-in creation", () => {
-  it("assigns a Tenant once, before the account exists", async () => {
+  it("assigns a Team once, before the account exists", async () => {
     const { policy, created } = recordingPolicy();
     await withPolicy(policy, async (user) => {
       expect(await user.loginOrCreateViaGatekeeper(EMAIL, true)).toEqual(expect.any(String));
@@ -83,7 +83,7 @@ describe("gatekeeper sign-in creation", () => {
 });
 
 describe("Cloudflare Access creation", () => {
-  it("assigns a Tenant once, before the account exists", async () => {
+  it("assigns a Team once, before the account exists", async () => {
     const { policy, created } = recordingPolicy();
     await withPolicy(policy, async (user) => {
       expect(await user.authenticateFromCfAccess(EMAIL, true)).toBe(true);

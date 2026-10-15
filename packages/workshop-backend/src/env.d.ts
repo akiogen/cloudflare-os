@@ -45,10 +45,10 @@ declare global {
       >;
       FRONTEND_ERROR_RATE_LIMITER?: RateLimit;
 
-      // Optional Tenant membership policy for deployments hosting several organizations. When
-      // absent, every user belongs to one Tenant (see getTenantPolicy in tenant-policy.ts).
-      TENANT_POLICY?: Service<
-        import("@gadgets/workshop-shared/tenant-policy").TenantPolicyEntrypoint
+      // Optional Team membership policy for deployments hosting several organizations. When
+      // absent, every user belongs to one Team (see getTeamPolicy in team-policy.ts).
+      TEAM_POLICY?: Service<
+        import("@gadgets/workshop-shared/team-policy").TeamPolicyEntrypoint
       >;
 
       // The Browser Run binding (BROWSER) used to render Gadget exports is intentionally NOT

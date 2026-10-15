@@ -1,43 +1,43 @@
-// Test double for the TENANT_POLICY binding (see workshop-shared/src/tenant-policy.ts).
+// Test double for the TEAM_POLICY binding (see workshop-shared/src/team-policy.ts).
 //
-// The Tenant is read from the username so tests need no setup: `ta…` is Tenant A, `tb…` is Tenant
-// B, and anything else is the default Tenant. Pair it with nextUsernames("taowner", "tbguest").
-// `POST /assign?user=<id>&tenant=<tenant>` overrides one user's Tenant, to simulate a move.
+// The Team is read from the username so tests need no setup: `ta…` is Team A, `tb…` is Team
+// B, and anything else is the default Team. Pair it with nextUsernames("taowner", "tbguest").
+// `POST /assign?user=<id>&team=<team>` overrides one user's Team, to simulate a move.
 // `GET /created?user=<id>` counts onUserCreated calls, and `POST /fail?user=<id>` makes the next
 // onUserCreated for that user throw once.
 //
-// BLOS ADR-0012: `POST /admin?user=<id>` makes a user an administrator of their Tenant and
+// BLOS ADR-0012: `POST /admin?user=<id>` makes a user an administrator of their Team and
 // `POST /depart?user=<id>` marks a user as departed. teamRole grants `build` to an administrator
-// of the owner's Tenant; allowSignIn refuses departed users; teamMembers lists, for an
-// administrator, every user created in their Tenant, departed users included.
+// of the owner's Team; allowSignIn refuses departed users; teamMembers lists, for an
+// administrator, every user created in their Team, departed users included.
 //
-// authorizeResource follows ADR-0009 with the Tenant ID as the mailbox handle: an email mailbox
-// name must be `<tenant>` or `<tenant>-<anything>`. Every other resource is allowed.
+// authorizeResource follows ADR-0009 with the Team ID as the mailbox handle: an email mailbox
+// name must be `<team>` or `<team>-<anything>`. Every other resource is allowed.
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import type { ResourceAuthorization, TenantPolicy } from "@gadgets/workshop-shared/tenant-policy";
+import type { ResourceAuthorization, TeamPolicy } from "@gadgets/workshop-shared/team-policy";
 
-type Env = { OVERRIDES: DurableObjectNamespace<TenantOverrides> };
+type Env = { OVERRIDES: DurableObjectNamespace<TeamOverrides> };
 
 // Module exports of a Worker must be handlers, so these stay module-private.
-const TENANT_A = "tenant-a";
-const TENANT_B = "tenant-b";
-const DEFAULT_TENANT = "default";
+const TEAM_A = "team-a";
+const TEAM_B = "team-b";
+const DEFAULT_TEAM = "default";
 
-function tenantForUsername(userId: string): string {
-  if (userId.startsWith("ta")) return TENANT_A;
-  if (userId.startsWith("tb")) return TENANT_B;
-  return DEFAULT_TENANT;
+function teamForUsername(userId: string): string {
+  if (userId.startsWith("ta")) return TEAM_A;
+  if (userId.startsWith("tb")) return TEAM_B;
+  return DEFAULT_TEAM;
 }
 
 /** One instance holds every override and counter; tests are few and small. */
-export class TenantOverrides extends DurableObject<Env> {
-  assign(userId: string, tenant: string): void {
-    this.ctx.storage.kv.put(`tenant:${userId}`, tenant);
+export class TeamOverrides extends DurableObject<Env> {
+  assign(userId: string, team: string): void {
+    this.ctx.storage.kv.put(`team:${userId}`, team);
   }
 
   get(userId: string): string | undefined {
-    return this.ctx.storage.kv.get<string>(`tenant:${userId}`);
+    return this.ctx.storage.kv.get<string>(`team:${userId}`);
   }
 
   failNext(userId: string): void {
@@ -48,7 +48,7 @@ export class TenantOverrides extends DurableObject<Env> {
   userCreated(userId: string): void {
     if (this.ctx.storage.kv.get<boolean>(`fail:${userId}`)) {
       this.ctx.storage.kv.delete(`fail:${userId}`);
-      throw new Error(`Tenant policy failure requested for ${userId}`);
+      throw new Error(`Team policy failure requested for ${userId}`);
     }
     this.ctx.storage.kv.put(`created:${userId}`, this.createdCount(userId) + 1);
   }
@@ -71,18 +71,18 @@ export class TenantOverrides extends DurableObject<Env> {
   }
 }
 
-export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements TenantPolicy {
-  #overrides(): DurableObjectStub<TenantOverrides> {
+export default class BlosTeamPolicy extends WorkerEntrypoint<Env> implements TeamPolicy {
+  #overrides(): DurableObjectStub<TeamOverrides> {
     return this.env.OVERRIDES.getByName("");
   }
 
-  async tenantOf(userId: string): Promise<string> {
-    return (await this.#overrides().get(userId)) ?? tenantForUsername(userId);
+  async teamOf(userId: string): Promise<string> {
+    return (await this.#overrides().get(userId)) ?? teamForUsername(userId);
   }
 
-  async sameTenant(a: string, b: string): Promise<boolean> {
-    const [tenantA, tenantB] = await Promise.all([this.tenantOf(a), this.tenantOf(b)]);
-    return tenantA === tenantB;
+  async sameTeam(a: string, b: string): Promise<boolean> {
+    const [teamA, teamB] = await Promise.all([this.teamOf(a), this.teamOf(b)]);
+    return teamA === teamB;
   }
 
   async onUserCreated(userId: string): Promise<void> {
@@ -91,7 +91,7 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
 
   async teamRole(ownerId: string, userId: string): Promise<"build" | "use" | null> {
     if (!(await this.#overrides().hasFlag("admin", userId))) return null;
-    return (await this.sameTenant(ownerId, userId)) ? "build" : null;
+    return (await this.sameTeam(ownerId, userId)) ? "build" : null;
   }
 
   async allowSignIn(userId: string): Promise<boolean> {
@@ -100,16 +100,16 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
 
   async teamMembers(userId: string): Promise<string[] | null> {
     if (!(await this.#overrides().hasFlag("admin", userId))) return null;
-    const tenant = await this.tenantOf(userId);
+    const team = await this.teamOf(userId);
     const users = await this.#overrides().createdUsers();
-    const tenants = await Promise.all(users.map(u => this.tenantOf(u)));
-    return users.filter((_, i) => tenants[i] === tenant);
+    const teams = await Promise.all(users.map(u => this.teamOf(u)));
+    return users.filter((_, i) => teams[i] === team);
   }
 
   async authorizeResource(userId: string, vendorId: string, resourceUrl: string)
       : Promise<ResourceAuthorization> {
     if (vendorId.toLowerCase() !== "email") return { allowed: true };
-    const handle = await this.tenantOf(userId);
+    const handle = await this.teamOf(userId);
     const at = resourceUrl.lastIndexOf("/mailbox/");
     const name = at < 0 ? "" : decodeURIComponent(resourceUrl.slice(at + "/mailbox/".length));
     if (name === handle || name.startsWith(`${handle}-`)) return { allowed: true };
@@ -121,8 +121,8 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
     const url = new URL(request.url);
     const user = url.searchParams.get("user");
     if (user === null) return new Response(null, { status: 404 });
-    if (url.pathname === "/tenant-of" && request.method === "GET") {
-      return Response.json({ tenant: await this.tenantOf(user) });
+    if (url.pathname === "/team-of" && request.method === "GET") {
+      return Response.json({ team: await this.teamOf(user) });
     }
     if (url.pathname === "/created" && request.method === "GET") {
       return Response.json({ count: await this.#overrides().createdCount(user) });
@@ -135,9 +135,9 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
       await this.#overrides().setFlag(url.pathname === "/admin" ? "admin" : "departed", user);
       return new Response(null, { status: 204 });
     }
-    const tenant = url.searchParams.get("tenant");
-    if (url.pathname === "/assign" && request.method === "POST" && tenant !== null) {
-      await this.#overrides().assign(user, tenant);
+    const team = url.searchParams.get("team");
+    if (url.pathname === "/assign" && request.method === "POST" && team !== null) {
+      await this.#overrides().assign(user, team);
       return new Response(null, { status: 204 });
     }
     return new Response(null, { status: 404 });

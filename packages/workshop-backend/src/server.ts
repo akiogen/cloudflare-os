@@ -31,7 +31,7 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
-import { getTenantPolicy, userDirectoryName } from "./tenant-policy.js";
+import { getTeamPolicy, userDirectoryName } from "./team-policy.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -148,15 +148,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async searchUsers(query: string, excludeIds: string[]): Promise<UserDirectoryRecord[]> {
     if (!(await this.#userSearchEnabled())) return [];
     const caller = this.#userId.name!;
-    const policy = getTenantPolicy(this.env);
-    const directory = userDirectoryName(await policy.tenantOf(caller));
+    const policy = getTeamPolicy(this.env);
+    const directory = userDirectoryName(await policy.teamOf(caller));
     const results = await retryOnDoReset(() => this.ctx.exports.UserDirectoryDurableObject
         .getByName(directory).searchUsers(query, [caller, ...excludeIds]));
-    // A user who moved Tenant stays in the old Tenant's directory until their next sign-in
+    // A user who moved Team stays in the old Team's directory until their next sign-in
     // (UserDurableObject.#syncDirectory), so a bound policy re-checks every result.
-    if (!this.env.TENANT_POLICY) return results;
-    const sameTenant = await Promise.all(results.map(r => policy.sameTenant(caller, r.id)));
-    return results.filter((_, i) => sameTenant[i]);
+    if (!this.env.TEAM_POLICY) return results;
+    const sameTeam = await Promise.all(results.map(r => policy.sameTeam(caller, r.id)));
+    return results.filter((_, i) => sameTeam[i]);
   }
   changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
     return this.#user.changePassword(oldHash, newHash);
@@ -335,9 +335,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return retryOnDoReset(() => this.#user.listGadgets());
   }
   async listTeamGadgets(): Promise<TeamGadget[]> {
-    // BLOS ADR-0012 P9: only a Tenant administrator gets a member list; everyone else, and every
-    // deployment without a Tenant policy, gets nothing.
-    const members = await getTenantPolicy(this.env).teamMembers(this.#userId.name!);
+    // BLOS ADR-0012 P9: only a Team administrator gets a member list; everyone else, and every
+    // deployment without a Team policy, gets nothing.
+    const members = await getTeamPolicy(this.env).teamMembers(this.#userId.name!);
     if (!members) return [];
     const lists = await Promise.all(members.map(async ownerId => {
       const gadgets = await retryOnDoReset(
@@ -755,7 +755,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let userId = this.users.idFromName(split[0]);
     await this.users.get(userId).authenticate(split[1]);
     // A departed member's sessions are refused (BLOS ADR-0012 P8).
-    if (!(await getTenantPolicy(this.env).allowSignIn(split[0]))) {
+    if (!(await getTeamPolicy(this.env).allowSignIn(split[0]))) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
     recordAnalytics(this.ctx, this.env, {
@@ -773,7 +773,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     let email = this.accessPayload.email as string;
     // A departed member is refused before the account is touched (BLOS ADR-0012 P8).
-    if (!(await getTenantPolicy(this.env).allowSignIn(email))) {
+    if (!(await getTeamPolicy(this.env).allowSignIn(email))) {
       throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
     }
     let userId = this.users.idFromName(email);

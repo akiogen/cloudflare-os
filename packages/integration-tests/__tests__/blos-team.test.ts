@@ -1,8 +1,8 @@
 // BLOS ADR-0012: Team Admins open the Team's Gadgets without a permission edge (P7), departed
 // members cannot sign in or use a session (P8), and Team Admins list the Team's Gadgets (P9).
 //
-// The fixture policy puts `ta…` users in Tenant A and `tb…` users in Tenant B. POST /admin makes a
-// user a Tenant administrator and POST /depart marks a user as departed.
+// The fixture policy puts `ta…` users in Team A and `tb…` users in Team B. POST /admin makes a
+// user a Team administrator and POST /depart marks a user as departed.
 
 import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
@@ -16,8 +16,8 @@ import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, logIn, nextUsernames, passwordHashFor, signUp } from "../src/rpc-client.js";
 
-const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-tenant-policy");
-const POLICY_WORKER = "blos-tenant-policy";
+const POLICY_DIR = resolve(import.meta.dirname, "../fixtures/blos-team-policy");
+const POLICY_WORKER = "blos-team-policy";
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor({ handlers: [mockChatCompletion("Test chat")] });
@@ -26,7 +26,7 @@ beforeAll(async () => {
   network.install();
   harness = await startHarness({
     gatekeepers: [],
-    services: [{ binding: "TENANT_POLICY", dir: POLICY_DIR }],
+    services: [{ binding: "TEAM_POLICY", dir: POLICY_DIR }],
   });
 });
 
@@ -96,7 +96,7 @@ async function openAs(username: string, workspaceId: string): Promise<string | u
   return (await opened.getMetadata()).role;
 }
 
-/** A member of `prefix`'s Tenant with one activated Gadget. */
+/** A member of `prefix`'s Team with one activated Gadget. */
 async function memberWithGadget(name: string): Promise<{ id: string }> {
   using publicApi = connect(requireHarness().url);
   using member = await signUp(publicApi, name);
@@ -132,7 +132,7 @@ it.concurrent("P7: a member who is not a Team Admin is refused", async () => {
   await expectOpenDenied(colleague, id);
 });
 
-it.concurrent("P7: an administrator of another Tenant is refused", async () => {
+it.concurrent("P7: an administrator of another Team is refused", async () => {
   const [ownerName, adminName] = usernames("taowner", "tbadmin");
   const { id } = await memberWithGadget(ownerName!);
   using adminPublic = connect(requireHarness().url);

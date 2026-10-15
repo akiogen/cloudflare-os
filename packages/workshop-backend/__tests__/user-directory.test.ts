@@ -62,7 +62,7 @@ describe("UserDirectoryDurableObject", { timeout: 30_000 }, () => {
       user("grace@example.com", "Grace Hopper"),
     ]);
 
-    // A later sync (for example, moving back to this Tenant) re-adds the record.
+    // A later sync (for example, moving back to this Team) re-adds the record.
     await stub.syncUser(user("ada@example.com", "Ada Lovelace"), 0);
     await expect(stub.searchUsers("ada@", [])).resolves.toEqual([
       user("ada@example.com", "Ada Lovelace"),
