@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, TeamGadget, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -333,6 +333,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     return retryOnDoReset(() => this.#user.listGadgets());
+  }
+  async listTeamGadgets(): Promise<TeamGadget[]> {
+    // BLOS ADR-0012 P9: only a Tenant administrator gets a member list; everyone else, and every
+    // deployment without a Tenant policy, gets nothing.
+    const members = await getTenantPolicy(this.env).teamMembers(this.#userId.name!);
+    if (!members) return [];
+    const lists = await Promise.all(members.map(async ownerId => {
+      const gadgets = await retryOnDoReset(
+          () => this.users.get(this.users.idFromName(ownerId)).listGadgets());
+      // Own Gadgets only: a shared Gadget is listed under its owner.
+      return gadgets.filter(g => !g.owner).map(g => ({ ...g, ownerId }));
+    }));
+    return lists.flat();
   }
 
   listOutputs(): Promise<ListOutputsResult> {
@@ -741,6 +754,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     let userId = this.users.idFromName(split[0]);
     await this.users.get(userId).authenticate(split[1]);
+    // A departed member's sessions are refused (BLOS ADR-0012 P8).
+    if (!(await getTenantPolicy(this.env).allowSignIn(split[0]))) {
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
     recordAnalytics(this.ctx, this.env, {
       event_name: "user_authenticated",
       user_id: userId.toString(),
@@ -755,6 +772,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     }
 
     let email = this.accessPayload.email as string;
+    // A departed member is refused before the account is touched (BLOS ADR-0012 P8).
+    if (!(await getTenantPolicy(this.env).allowSignIn(email))) {
+      throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
+    }
     let userId = this.users.idFromName(email);
     let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
     let accountCreated =

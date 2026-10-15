@@ -31,6 +31,13 @@ describe("SINGLE_TENANT_POLICY", () => {
   it("does nothing when an account is created", async () => {
     await expect(SINGLE_TENANT_POLICY.onUserCreated("alice@example.com")).resolves.toBeUndefined();
   });
+
+  // BLOS ADR-0012: without a bound policy, P7–P9 change nothing.
+  it("grants no Tenant role, refuses no sign-in and lists no members", async () => {
+    await expect(SINGLE_TENANT_POLICY.teamRole("alice@example.com", "bob")).resolves.toBeNull();
+    await expect(SINGLE_TENANT_POLICY.allowSignIn("alice@example.com")).resolves.toBe(true);
+    await expect(SINGLE_TENANT_POLICY.teamMembers("alice@example.com")).resolves.toBeNull();
+  });
 });
 
 describe("userDirectoryName", () => {

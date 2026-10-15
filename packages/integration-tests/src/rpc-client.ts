@@ -66,9 +66,12 @@ export function stubFor<T extends RpcTarget>(target: T): RpcStub<T> {
   return new RpcStub(target) as unknown as RpcStub<T>;
 }
 
-// The server stores and compares these bytes verbatim and never re-derives them, so the tests skip
-// the frontend's argon2id (64 MiB per call) in favour of a deterministic stand-in.
-function passwordHashFor(username: string): Uint8Array {
+/**
+ * The password hash of an integration-test account. The server stores and compares these bytes
+ * verbatim and never re-derives them, so the tests skip the frontend's argon2id (64 MiB per call)
+ * in favour of a deterministic stand-in.
+ */
+export function passwordHashFor(username: string): Uint8Array {
   return new Uint8Array(createHash("sha256").update(`integration-test:${username}`).digest());
 }
 

@@ -9345,7 +9345,10 @@ class OverseerImpl implements AgentHooks {
         requireRole?: CollaboratorRole;
       } = {}): Promise<CollaboratorRole | null> {
     let sharing = await this.getSharingManager();
-    let role = sharing.getEffectiveRole(profileId);
+    // Without a permission edge, a Tenant role may grant one (BLOS ADR-0012 P7). An existing edge
+    // is never widened or narrowed by it.
+    let role = sharing.getEffectiveRole(profileId)
+        ?? await getTenantPolicy(this.env).teamRole(await this.getOwnerProfileId(), profileId);
     if (!role || (opts.requireRole && roleRank(role) < roleRank(opts.requireRole))) return null;
     // A permission edge grants nothing across Tenants (ADR-0005 P4): an edge written before the
     // collaborator moved Tenant, or before a Tenant policy was bound, is ignored.

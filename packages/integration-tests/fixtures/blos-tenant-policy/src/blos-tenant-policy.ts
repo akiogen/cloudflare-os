@@ -6,6 +6,11 @@
 // `GET /created?user=<id>` counts onUserCreated calls, and `POST /fail?user=<id>` makes the next
 // onUserCreated for that user throw once.
 //
+// BLOS ADR-0012: `POST /admin?user=<id>` makes a user an administrator of their Tenant and
+// `POST /depart?user=<id>` marks a user as departed. teamRole grants `build` to an administrator
+// of the owner's Tenant; allowSignIn refuses departed users; teamMembers lists, for an
+// administrator, every user created in their Tenant, departed users included.
+//
 // authorizeResource follows ADR-0009 with the Tenant ID as the mailbox handle: an email mailbox
 // name must be `<tenant>` or `<tenant>-<anything>`. Every other resource is allowed.
 
@@ -51,6 +56,19 @@ export class TenantOverrides extends DurableObject<Env> {
   createdCount(userId: string): number {
     return this.ctx.storage.kv.get<number>(`created:${userId}`) ?? 0;
   }
+
+  createdUsers(): string[] {
+    return [...this.ctx.storage.kv.list<number>({ prefix: "created:" })]
+        .map(([key]) => key.slice("created:".length));
+  }
+
+  setFlag(flag: "admin" | "departed", userId: string): void {
+    this.ctx.storage.kv.put(`${flag}:${userId}`, true);
+  }
+
+  hasFlag(flag: "admin" | "departed", userId: string): boolean {
+    return this.ctx.storage.kv.get<boolean>(`${flag}:${userId}`) ?? false;
+  }
 }
 
 export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements TenantPolicy {
@@ -69,6 +87,23 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
 
   async onUserCreated(userId: string): Promise<void> {
     await this.#overrides().userCreated(userId);
+  }
+
+  async teamRole(ownerId: string, userId: string): Promise<"build" | "use" | null> {
+    if (!(await this.#overrides().hasFlag("admin", userId))) return null;
+    return (await this.sameTenant(ownerId, userId)) ? "build" : null;
+  }
+
+  async allowSignIn(userId: string): Promise<boolean> {
+    return !(await this.#overrides().hasFlag("departed", userId));
+  }
+
+  async teamMembers(userId: string): Promise<string[] | null> {
+    if (!(await this.#overrides().hasFlag("admin", userId))) return null;
+    const tenant = await this.tenantOf(userId);
+    const users = await this.#overrides().createdUsers();
+    const tenants = await Promise.all(users.map(u => this.tenantOf(u)));
+    return users.filter((_, i) => tenants[i] === tenant);
   }
 
   async authorizeResource(userId: string, vendorId: string, resourceUrl: string)
@@ -94,6 +129,10 @@ export default class BlosTenantPolicy extends WorkerEntrypoint<Env> implements T
     }
     if (url.pathname === "/fail" && request.method === "POST") {
       await this.#overrides().failNext(user);
+      return new Response(null, { status: 204 });
+    }
+    if ((url.pathname === "/admin" || url.pathname === "/depart") && request.method === "POST") {
+      await this.#overrides().setFlag(url.pathname === "/admin" ? "admin" : "departed", user);
       return new Response(null, { status: 204 });
     }
     const tenant = url.searchParams.get("tenant");

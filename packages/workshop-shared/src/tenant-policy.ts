@@ -23,6 +23,19 @@ export interface TenantPolicy {
    */
   authorizeResource(userId: string, vendorId: string, resourceUrl: string)
       : Promise<ResourceAuthorization>;
+  /**
+   * The role a Tenant role grants `userId` on a Gadget owned by `ownerId`, for a caller with no
+   * permission edge (BLOS ADR-0012 P7); `null` grants nothing. Never consulted when an edge exists,
+   * and the same-Tenant check and observer verification still apply.
+   */
+  teamRole(ownerId: string, userId: string): Promise<"build" | "use" | null>;
+  /** Whether `userId` may sign in and use a session; false for a departed member (ADR-0012 P8). */
+  allowSignIn(userId: string): Promise<boolean>;
+  /**
+   * The members of `userId`'s Tenant, departed members included, when `userId` administers it;
+   * `null` otherwise (ADR-0012 P9).
+   */
+  teamMembers(userId: string): Promise<string[] | null>;
 }
 
 /** Outcome of `TenantPolicy.authorizeResource`. `message` is shown to the caller as is. */
@@ -41,4 +54,7 @@ export const SINGLE_TENANT_POLICY: TenantPolicy = Object.freeze({
   onUserCreated: async (_userId: string) => {},
   authorizeResource: async (_userId: string, _vendorId: string, _resourceUrl: string)
       : Promise<ResourceAuthorization> => ({ allowed: true }),
+  teamRole: async (_ownerId: string, _userId: string) => null,
+  allowSignIn: async (_userId: string) => true,
+  teamMembers: async (_userId: string) => null,
 });
