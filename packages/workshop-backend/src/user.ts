@@ -1628,6 +1628,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (this.ctx.id.equals(selectedId)) return null;
     let selectedProfile = await this.ctx.exports.UserDurableObject.get(selectedId).whoamiIfExists();
     if (!selectedProfile) return null;
+    // Another Team's user gets exactly what a missing account gets (BLOS ADR-0005 P3, P10).
+    if (!(await getTeamPolicy(this.env).sameTeam(this.storage.profile.get().id, selectedProfile.id))) {
+      return null;
+    }
     let profile = { displayName: selectedProfile.name };
     let { secret, hash: ticketHash } = await newSecretToken();
     let expiresAt = new Date(Date.now() + GATEKEEPER_USER_SELECTION_LIFETIME_MS);
