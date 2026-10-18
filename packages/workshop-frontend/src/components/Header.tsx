@@ -7,6 +7,7 @@ import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
 import TopBarNotice from '../TopBarNotice'
 import SiteLogo from './SiteLogo'
+import { teamPageUrl } from './teamPage'
 
 export default function Header() {
   const auth = useOptionalAuthenticatedApi()
@@ -161,6 +162,11 @@ export default function Header() {
               <>
                 <hr className="my-2 border-kumo-line" />
 
+                {teamPageUrl() && (
+                  <a href={teamPageUrl()} onClick={closeMobileMenu} className={navLinkClass}>
+                    Team
+                  </a>
+                )}
                 <Link
                   to="/profile"
                   onClick={closeMobileMenu}

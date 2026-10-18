@@ -3,12 +3,14 @@ import { DropdownMenu } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useAvatar } from '../useAvatar'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './menuStyles'
+import { teamPageUrl } from './teamPage'
 
 export default function UserMenu() {
   const { authenticatedApi, logout, currentUser, isAdmin } = useAuthenticatedApi()
   const navigate = useNavigate()
 
   const avatarUrl = useAvatar(authenticatedApi, currentUser?.id)
+  const teamUrl = teamPageUrl()
 
   const initials = currentUser?.name
     ? currentUser.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
@@ -32,6 +34,14 @@ export default function UserMenu() {
         }
       />
       <DropdownMenu.Content className={MENU_CONTENT} style={MENU_POSITIONER_STYLE}>
+        {teamUrl && (
+          <DropdownMenu.Item
+            onClick={() => window.location.assign(teamUrl)}
+            className={MENU_ITEM}
+          >
+            Team
+          </DropdownMenu.Item>
+        )}
         <DropdownMenu.Item
           onClick={() => navigate({ to: '/profile' })}
           className={MENU_ITEM}

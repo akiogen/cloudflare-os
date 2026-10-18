@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   // In this mode, password-based login/signup is disabled and the app authenticates
   // via the CF Access JWT that Access injects into requests before they reach the server.
   readonly VITE_CF_ACCESS_MODE?: string;
+  /** BLOS (business-loop-os ADR-0015): the Team page the profile menus link to. */
+  readonly VITE_TEAM_PAGE_URL?: string;
 }
 
 interface ImportMeta {
