@@ -21,6 +21,7 @@ import { PersonAvatar } from './components/PersonAvatar'
 import { copyToClipboard } from './clipboard'
 import { isImeComposing } from './keyboardEvent'
 import { useServerConfig } from './ServerConfigContext'
+import { emailOfAccount } from "@gadgets/workshop-shared/team-policy";
 
 type CollaboratorRow =
   | { kind: 'owner'; profile: AiChatAuthorInfo }
@@ -228,7 +229,7 @@ function DependentKeepList({
             label={(
               <span className="flex min-w-0 items-baseline gap-1.5">
                 <span className="truncate text-[12px] font-medium text-kumo-default">{dep.profile.name}</span>
-                <span className="truncate text-[11px] text-kumo-subtle">{dep.profile.id}</span>
+                <span className="truncate text-[11px] text-kumo-subtle">{emailOfAccount(dep.profile.id)}</span>
               </span>
             )}
             checked={keepSet.has(dep.profile.id)}
@@ -1189,7 +1190,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                             {user.name}
                           </span>
                           <span className="block truncate font-mono text-[11px] text-kumo-subtle">
-                            {user.id}
+                            {emailOfAccount(user.id)}
                           </span>
                         </span>
                       </button>

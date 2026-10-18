@@ -20,7 +20,7 @@ import { isReservedBlueprintKey, readBlueprintKvRecord } from "./storage-schema/
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import { getTeamPolicy, userDirectoryName } from "./team-policy.js";
-import { SINGLE_TEAM_ID } from "@gadgets/workshop-shared/team-policy";
+import { SINGLE_TEAM_ID, emailOfAccount } from "@gadgets/workshop-shared/team-policy";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, hashSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 import { deliver, registerDevice } from "./notification-service.js";
 import {
@@ -321,7 +321,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         this.storage.created.put(true);
         this.storage.profile.put({
           type: "user",
-          name: email.split("@")[0],
+          name: emailOfAccount(email).split("@")[0],
           id: email,
         });
       });
@@ -497,7 +497,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         this.storage.created.put(true);
         this.storage.profile.put({
           type: "user",
-          name: email.split("@")[0],
+          name: emailOfAccount(email).split("@")[0],
           id: email,
         });
       });
@@ -1624,7 +1624,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   ): Promise<GatekeeperUserSelection | null> {
     let app = await this.#uiAccountRecord(appAccountId);
     if (!app) throw new Error("No such app.");
-    let selectedId = this.ctx.exports.UserDurableObject.idFromName(selectedUserId);
+    // The selected person's account in this account's Team (BLOS ADR-0015 Decision 8).
+    let selectedAccount = await getTeamPolicy(this.env)
+        .accountInTeamOf(this.storage.profile.get().id, selectedUserId);
+    if (selectedAccount === null) return null;
+    let selectedId = this.ctx.exports.UserDurableObject.idFromName(selectedAccount);
     if (this.ctx.id.equals(selectedId)) return null;
     let selectedProfile = await this.ctx.exports.UserDurableObject.get(selectedId).whoamiIfExists();
     if (!selectedProfile) return null;
@@ -1636,7 +1640,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let { secret, hash: ticketHash } = await newSecretToken();
     let expiresAt = new Date(Date.now() + GATEKEEPER_USER_SELECTION_LIFETIME_MS);
     this.storage.pendingUserSelections.put({
-      ticketHash, appAccountId, vendorId: app.vendorId, selectedUserId, expiresAt,
+      ticketHash, appAccountId, vendorId: app.vendorId, selectedUserId: selectedAccount, expiresAt,
     });
     await this.#armExpirySweep();
     return { ticket: secret.toHex(), profile };

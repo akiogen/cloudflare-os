@@ -39,6 +39,7 @@ import { ConnectHandoff, GatekeeperConnectCallback, GatekeeperUser } from "@gadg
 import { createWorkshopLogger } from "../observability";
 import { CLOUDFLARE_VENDOR_ID, type UserDurableObject } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
+import { getTeamPolicy } from "../team-policy.js";
 import {
   CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken,
   PENDING_HANDOFF_LIFETIME_MS,
@@ -214,12 +215,22 @@ export class LoginConnectCallbackImpl
         await pending.fail("This account has no verified email, so it can't be used to sign in.");
         return;
       }
+      // The Team policy names the account this person signs in to (BLOS ADR-0015 Decision 3);
+      // without one it is the email itself.
+      const accountId = await getTeamPolicy(this.env).signInAccount(email);
+      if (accountId === null) {
+        loginLogger.info("gatekeeper login finished", {
+          event: "gatekeeper.login.finished", outcome: "refused_by_team_policy",
+        });
+        await pending.fail("This account can't sign in to this deployment.");
+        return;
+      }
       const userStub = this.ctx.exports.UserDurableObject.get(
-          this.ctx.exports.UserDurableObject.idFromName(email));
+          this.ctx.exports.UserDurableObject.idFromName(accountId));
       // Closed signups block first-time account creation here too (not just password signup); an
       // existing user signing in is unaffected.
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
+      const secret = await userStub.loginOrCreateViaGatekeeper(accountId, signupsEnabled);
       if (secret === null) {
         loginLogger.info("gatekeeper login finished", {
           event: "gatekeeper.login.finished", outcome: "signups_disabled",
@@ -236,8 +247,8 @@ export class LoginConnectCallbackImpl
         await pending.link(userStub.id.toString(), accountId);
       }
       // Session tokens are "<doName>:<secret>"; PublicApi.authenticate() routes via idFromName of
-      // the first part. The user DO is keyed by email, so the prefix must be the email.
-      await pending.deliver(`${email}:${secret}`, ticketHash);
+      // the first part. The user DO is keyed by the account name, so the prefix must be it.
+      await pending.deliver(`${accountId}:${secret}`, ticketHash);
       loginLogger.info("gatekeeper login finished", {
         event: "gatekeeper.login.finished", outcome: "ok",
       });

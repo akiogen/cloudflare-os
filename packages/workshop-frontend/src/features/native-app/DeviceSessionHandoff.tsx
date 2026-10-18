@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { AiChatAuthorInfo, AuthenticatedApi, DeviceSessionHandoffStart } from '@gadgets/workshop-shared/api'
 import { logRpcFailure, rpcFailureDescription } from '../../rpcErrors'
+import { emailOfAccount } from "@gadgets/workshop-shared/team-policy";
 
 const STATE_PARAMETER = 'cfos_native_state'
 const KEY_PARAMETER = 'cfos_native_key'
@@ -146,7 +147,7 @@ export const DeviceSessionHandoff = ({
         {!working && !identityFailed && (
           <p className="text-sm text-kumo-subtle">
             {confirmedUser
-              ? `Signed in as ${confirmedUser.name} (${confirmedUser.id}) on ${window.location.host}.`
+              ? `Signed in as ${confirmedUser.name} (${emailOfAccount(confirmedUser.id)}) on ${window.location.host}.`
               : 'Checking your account…'}
           </p>
         )}

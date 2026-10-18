@@ -56,6 +56,21 @@ describe("gatekeeper user selection across Teams (P10)", () => {
     await expect(hooks().pick(viewer, app, uniqueUser("ta-missing"))).resolves.toBeNull();
   });
 
+  it("selects the person's account in the caller's Team (ADR-0015)", async () => {
+    const viewer = uniqueUser("ta-view");
+    const person = uniqueUser("ta-person");
+    // The person's account in the viewer's Team is `<person>#team-a`.
+    const scoped: TeamPolicy = {
+      ...twoTeams,
+      accountInTeamOf: async (_caller, email) => `${email}#team-a`,
+    };
+    await Promise.all([createUser(viewer, scoped), createUser(`${person}#team-a`), createUser(person)]);
+    const app = await hooks().addAccount(viewer, "context", `${viewer}-context`, { providesUi: true });
+    await expect(hooks().pick(viewer, app, person)).resolves.toMatchObject({
+      profile: { displayName: `Name of ${person}#team-a` },
+    });
+  });
+
   it("selects anyone without a TEAM_POLICY binding (upstream behavior)", async () => {
     const viewer = uniqueUser("ta-view");
     const other = uniqueUser("tb-picked");
