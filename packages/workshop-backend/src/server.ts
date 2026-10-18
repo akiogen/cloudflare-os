@@ -870,8 +870,11 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     }
 
     username = normalizeUsername(username);
+    // The account the Team policy names for this person (BLOS ADR-0015 Decision 3).
+    let accountId = await getTeamPolicy(this.env).signInAccount(username);
+    if (accountId === null) return null;
 
-    let id = this.users.idFromName(username);
+    let id = this.users.idFromName(accountId);
     let token = await this.users.get(id).login(passwordHash);
     if (!token) return null;
 
@@ -881,7 +884,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       source: "password",
     });
 
-    return `${username}:${token}`;
+    return `${accountId}:${token}`;
   }
 
   async createAccount(username: string, displayName: string, passwordHash: Uint8Array)
@@ -897,11 +900,14 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     }
 
     username = normalizeUsername(username);
+    // The account the Team policy names for this person (BLOS ADR-0015 Decision 3).
+    let accountId = await getTeamPolicy(this.env).signInAccount(username);
+    if (accountId === null) return null;
 
-    let id = this.users.idFromName(username);
+    let id = this.users.idFromName(accountId);
     let user = this.users.get(id);
 
-    let token = await user.createAccount(username, displayName, passwordHash);
+    let token = await user.createAccount(accountId, displayName, passwordHash);
     if (!token) return null;
 
     recordAnalytics(this.ctx, this.env, {
@@ -910,7 +916,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       source: "password",
     });
 
-    return `${username}:${token}`;
+    return `${accountId}:${token}`;
   }
 
   async getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
