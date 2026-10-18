@@ -6,11 +6,26 @@ import type { RpcTarget } from "capnweb";
 /** Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased). */
 export const VENDOR_ID = "context";
 
+/** Error returned when a visible collection already uses the requested title. */
+export const DUPLICATE_COLLECTION_TITLE_ERROR = "A collection with this name already exists.";
+
 // ---------------------------------------------------------------------------
 // Read-session value types
 //
 // Keep these in sync with CONTEXT_LIBRARY_TYPES in library-gatekeeper.ts.
 // ---------------------------------------------------------------------------
+
+/** Agent-facing read capability over the account's enabled Context collections. */
+export interface ContextLibrary extends RpcTarget {
+  /** Search enabled collections, optionally narrowed to one collection. */
+  search(query: string, opts?: {
+    collectionId?: string; limit?: number;
+  }): Promise<ContextSearchResult[]>;
+  /** List collection discovery metadata, or the contents of a selected collection subtree. */
+  list(opts?: { collectionId?: string; path?: string }): Promise<ContextListing>;
+  /** Read a document by its catalog/list/search ID, or return null when it is unavailable. */
+  read(docId: string): Promise<ContextReadResult | null>;
+}
 
 /** Search result. */
 export type ContextSearchResult = {
@@ -331,8 +346,20 @@ export interface ContextApi extends RpcTarget {
   putContextDocument(collectionId: string, path: string, doc: {
     description: string; body: string; contentType?: string;
   }): Promise<void>;
+  /** Creates a skill, rejecting the operation if its directory is already occupied. */
+  createContextSkill(collectionId: string, path: string, doc: {
+    description: string; body: string; contentType?: string;
+  }): Promise<void>;
   deleteContextDocument(collectionId: string, path: string): Promise<void>;
+  /** Atomically deletes a skill and its supporting files. */
+  deleteContextSkill(collectionId: string, manifestPath: string): Promise<void>;
+  /** Atomically deletes a document path and every document below it. */
+  deleteContextDocumentTree(collectionId: string, path: string): Promise<void>;
   moveContextDocument(collectionId: string, fromPath: string, toPath: string): Promise<void>;
+  /** Atomically moves a skill and its supporting files within its collection. */
+  moveContextSkill(collectionId: string, manifestPath: string, directoryPath: string): Promise<void>;
+  /** Atomically renames a skill directory and its manifest name. */
+  renameContextSkill(collectionId: string, manifestPath: string, newName: string): Promise<void>;
   /** Own private collections plus every public one. */
   listEnabledContextCollections(): Promise<EnabledCollectionInfo[]>;
   /** Whether the viewer may edit this collection: own private collection, or public collection as admin. */

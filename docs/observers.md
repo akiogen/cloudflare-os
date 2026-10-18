@@ -34,13 +34,15 @@ The mechanism is a per-user, gatekeeper-mediated check — "this data may be sha
 people who *also* have access to it". (Maximally sensitive data gets an extra layer: an
 observation marked **`containsRestrictedData`**
 (`ObservationDescription.containsRestrictedData` in `packages/workshop-shared/src/gatekeeper.ts`)
-puts the workspace into a restricted mode — no actions, no web fetches. Its coverage rests on
-admission: nobody can open the workspace without being verified against the producing gatekeeper,
-and anything that widens what they must be verified against restarts every live session. An
-observation that also carries **`ownerInvitesOnly`** sets that flag on the workspace: from then on
-only direct grants from the owner count, so share links admit nobody, people who joined through a
-link or another collaborator lose access, and only the owner can add collaborators; see
-`sharing.md`, "`ownerInvitesOnly`".)
+puts the workspace into a restricted mode — no web fetches, and every action requires manual
+approval (auto-approval rules are suspended), the approver checking the action text for restricted
+data. An action whose description is not complete (`ActionDescription.descriptionIsComplete`)
+is accepted and flagged to the approver; only git pushes are refused. Its coverage rests on admission: nobody can open the workspace without being verified
+against the producing gatekeeper, and anything that widens what they must be verified against
+restarts every live session. An observation that also carries **`ownerInvitesOnly`** sets that
+flag on the workspace: from then on only direct grants from the owner count, so share links admit
+nobody, people who joined through a link or another collaborator lose access, and only the owner
+can add collaborators; see `sharing.md`, "`ownerInvitesOnly`".)
 
 The check works as follows:
 
@@ -107,11 +109,11 @@ The check works as follows:
 | `containsRestrictedData` enforcement | `overseer.ts` (`authorizeObservation` sets `containsRestrictedData`; `getWebFetchEnv`, `submitAction`) |
 | `ownerInvitesOnly` enforcement | `overseer.ts` (`authorizeObservation` sets `ownerInvitesOnly` and restarts the workspace if anyone lost access); `sharing.ts` (`computeEffectiveRoles` counts only direct owner grants; the `ownerInvitesOnly` hook in `redeemShareKey`, `addCollaborator`, `createShareLink`, `newShareLinkKey`) |
 | Observation recording | `overseer.ts` `authorizeObservation()`; `ApprovalQueueImpl` |
-| Gatekeeper storage record | `overseer.ts` `GatekeeperRecord` (has `creationSpec.vendorId`) |
+| Gatekeeper storage record | `overseer-storage.ts` `GatekeeperRecord` (has `creationSpec.vendorId`) |
 | `GatekeeperCreationSpec` | `packages/workshop-shared/src/api.ts` |
 | Gatekeeper facet access | `overseer.ts` `getGatekeeperFacet()` |
-| Overseer storage collections | `overseer.ts` (`gatekeepers`, with `byBindingName` index — template for a new collection) |
-| Connected accounts (User DO) | `packages/workshop-backend/src/user.ts` `ConnectedAccountRecord` (`account: Fetcher<GatekeeperUser>`, `vendorId`) |
+| Overseer storage collections | `overseer-storage.ts` (`gatekeepers`, with `byBindingName` index — template for a new collection) |
+| Connected accounts (User DO) | `packages/workshop-backend/src/storage-schema/user-storage.ts` `ConnectedAccountRecord` (`account: Fetcher<GatekeeperUser>`, `vendorId`) |
 | List connected accounts | `user.ts` `subscribeConnectedAccounts()`; subscriber type in `api.ts` |
 | Account → gatekeeper class | `user.ts` `getGatekeeperClassFor()` |
 
@@ -147,7 +149,7 @@ The check works as follows:
 ### New overseer storage collection: `observers`
 
 Add an `observers` collection to `OverseerStorage` (mirror the `gatekeepers` collection in
-`overseer.ts`, including a secondary index for reverse lookup):
+`overseer-storage.ts`, including a secondary index for reverse lookup):
 
 ```ts
 type ObserverRecord = {
@@ -410,31 +412,34 @@ gadget-minted children alike:
   only after authorization (verification itself is covered by `authorizeCollaborator`'s internal
   lease): a caller who is turned away must never have counted, or a stranger racing an
   `addGatekeeper()` would cause a needless workspace reset.
-- **Known gap — the agent turn an external message starts** outlives that RPC's lease (it is
-  fire-and-forget, and its persisted `ActiveAgentRecord` even survives DO resets, resuming with
-  no re-verification), so a widening mid-turn finds no session to sever and the reply egresses
-  to the persisted external response target under stale verification. Tolerated only because
-  nothing calls `receiveExternalMessage` yet; the required fix (a per-turn `build` lease from
-  `#registerRunningAgent` to `#unregisterRunningAgent`, persisted as a marker on
-  `ActiveAgentRecord`, plus `authorizeCollaborator` re-run on resume with the turn cancelled on
-  denial) is spelled out in the comment at the endpoint and must land before it gets real
-  callers. Owner and UI-collaborator turns are not affected: the owner is never an observer, a
-  UI collaborator's replies land in the chat log behind re-verified opens, and gadget-callback
-  turns have no external egress.
+- **Resumed person-initiated turns** re-run `authorizeCollaborator` with `requireRole: "build"`
+  for the original non-owner initiator before inference, and hold a `build` lease through the
+  resumed turn. This applies after a DO reset and after a decision pause. Denial ends the turn
+  with an error; a later approver cannot lend it their authority.
+- **Known gap — a freshly started external-message turn** outlives that RPC's lease because it
+  is fire-and-forget. Before its first reset or decision pause, a widening can therefore find
+  no session to sever, and its reply can egress to the persisted external response target under
+  stale verification. The resumed path above is covered, but the initial run still needs its
+  own per-turn `build` lease before `receiveExternalMessage` gets real callers. No extra durable
+  marker is needed for that resume check: the existing `ActiveAgentRecord` retains the original
+  initiator. Owner and UI-collaborator turns are not affected by this external-egress gap: the
+  owner is never an observer, and a UI collaborator reads replies through re-verified opens.
 
   The same mechanism has a spawner variant: a `use` collaborator holding a bound spawner's
   loopback can start a spawn during the window between a widening's restart being scheduled and
   the reset landing (`spawnAgent` checks no quarantine, and the spawner itself is vendorless so
   it is never the thing quarantined). The spawn persists an `ActiveAgentRecord` that the reset's
-  storage sync commits, and the resumed turn re-runs no authorization — so it completes with its
-  creator's authority against the pre-widening scope. Bounded, unlike the external-message case:
+  storage sync commits. Its initiator is a gadget, so the person-initiated resume check above does
+  not apply: it can complete with its creator's authority against the pre-widening scope.
+  Bounded, unlike the external-message case:
   the resumed turn has no external egress, its output lands in workspace state, and every
   `use`-role reader of that state re-verifies at their next open against the now-widened scope —
   so the only unverified consumption is inside the restart's own delivery window, which the
-  design already tolerates for sessions the reset is about to sever. The per-turn-lease fix
-  above (re-run `authorizeCollaborator` on resume, cancel on denial) closes this variant too.
+  design already tolerates for sessions the reset is about to sever. Closing this variant still
+  needs lifecycle authorization for gadget-authored turns; re-checking person-initiated resumes
+  alone does not cover it.
 
-Four events trigger it:
+Five events trigger it:
 
 | Event | What grows |
 |---|---|
@@ -442,6 +447,7 @@ Four events trigger it:
 | `bindWorkpiece()` for a permanent (non-`chatId`) edge onto a vendor-backed connection — or onto a legacy (pre-`creationSpec`) one, which nobody *can* be verified against, so it restarts and quarantines and fresh `use` opens then fail closed on the reconnect-required error | **use** scope — the gadget UI a `use` session drives can now invoke it |
 | A merge that promotes a pending gadget or a pending binding edge into `use` scope | **use** scope, same reason |
 | `enableHook` on a vendor-backed connection not already in `use` scope | **use** scope — the hook delivers the connection's data into a gadget a `use` session can open (a hook waking a still-provisional gadget stays out of `use` scope until promotion; the merge diff reports that widening) |
+| Approving a creation queued by the agent's `createExternalResource` | every role's scope — the connection was published without a restart because until now it only simulated its resource, so nobody was verified against the real one. The restart is unconditional on role, since the connection may already be bound |
 
 The two roles widen independently, so each trigger passes the role it grew and the restart is
 skipped when no collaborator holds it: a new connection is in every `build` collaborator's scope
@@ -491,11 +497,11 @@ scheduled, every trigger additionally marks the widened connection ids in the in
 `#gatekeepersPendingRestart` set: `addGatekeeper` marks the just-published id, and the three
 `use`-scope triggers mark each id their diff widened (marking gatekeeper ids suffices as
 quarantine because a binding loopback is not a session but a per-call route: its props name the
-target and every call re-resolves a session through `openSession`, where the mark is checked —
+target and every call re-resolves a session through `openGatekeeperSession`, where the mark is checked —
 so the quarantine holds even for a loopback retained across a facet abort or the reset itself,
 which is *not* merely "re-minted on facet reload"). Every route to a marked connection refuses with a retryable error until
 the reset destroys the mark along with the sessions: `getGatekeeperById` (the mint clients
-pipeline on), `GatekeeperClientImpl.openSession` (which binding loopbacks also pass through), the
+pipeline on), `openGatekeeperSession` (which client opens and binding loopbacks both pass through), the
 slash-command invoke in `#prepareChatMessage`, `GadgetClientImpl.bindWithSuggestedName`, and
 `startHook` — the inbound gatekeeper→gadget delivery route, whose arming enable may itself be the
 widening that scheduled the restart — while the enumerating routes (`listSlashCommands`, the
@@ -570,7 +576,7 @@ For each id in `description.excludeObservers`:
      `agentCallbackArgs` and re-injected later) keeps opening sessions until `removeGatekeeper`.
      Unreachability is currently assumed rather than enforced; the required fix is a per-call
      edge check (`#assertBindingEdgeLive`, matching on binding *target* for gadget callers) in
-     `startGatekeeperSession`'s gatekeeper branch, beside `openSession`'s quarantine check. Until
+     `startGatekeeperSession`'s gatekeeper branch, beside `openGatekeeperSession`'s quarantine check. Until
      it lands, this arm is fail-open twice over: the observation is admitted, and the
      de-registration stops the gatekeeper naming that observer in `excludeObservers` at all, so
      every later observation is admitted too — until a rebind plus a fresh open re-registers
@@ -673,7 +679,11 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
    at every `open()`, so nobody can be in the workspace without having passed the producing
    gatekeeper's `addObserver()`, and anything that widens what they must pass restarts every live
    session (see "Restarting when verification scope widens"). Setting `containsRestrictedData` also
-   puts the workspace into a restricted mode that blocks actions and web fetches.
+   puts the workspace into a restricted mode: no web fetches, and every action requires manual
+   approval (auto-approval rules are suspended), the approver checking the action text for
+   restricted data. An action whose description is not complete
+   (`ActionDescription.descriptionIsComplete`) is accepted and flagged to the approver; only git
+   pushes are refused.
    Verification is held to each collaborator's own role scope, because `ensureObserver` can
    never verify beyond it: a `use` collaborator can't be covered for a gatekeeper outside their
    scope (one no gadget binds and no enabled hook feeds — see `#useScopeGatekeeperIds`).
@@ -780,8 +790,10 @@ its resource types.
 
 - **A — Private-only.** Non-owner observers are refused: `addObserver()` unconditionally throws.
   For data that must additionally never leak back out, the `containsRestrictedData` restricted
-  mode (no actions, no web fetches) is available separately; combined with strategy A it makes
-  the workspace effectively private once sensitive data is observed.
+  mode (no web fetches, and every action requires manual approval — auto-approval rules are
+  suspended — the approver checking the action text for restricted data) is available separately;
+  combined with strategy A it makes the workspace effectively private once sensitive data is
+  observed.
   `getVerifier()` must still exist (the overseer mints one on every open) but is never consulted.
 
 - **B — ACL check (single unit).** The resource is treated as one atomic unit.
@@ -820,9 +832,12 @@ its resource types.
 | **github** | Repo / Issue / PR | **B** | Check the observer's GitHub identity has read access to the bound repo (public → always pass; private → collaborator/org-team check). Issues/PRs inherit the repo ACL, so the repo is the atomic unit. |
 | **google** | Google Doc | **B** | Check the observer's Drive sharing access to the bound document. |
 | **google** | Google Spreadsheet | **B** | Check the observer's Google Sheets access to the bound spreadsheet. Spreadsheet sharing applies to the whole file, so it is the atomic unit. |
+| **google** | Google Slides Presentation | **B** | Check the observer's Google Slides access to the bound presentation. Presentation sharing applies to the whole file, so it is the atomic unit. |
 | **google** | Google Calendar (selected calendar) | **B** | Require `writer` or `owner` access to the bound calendar, since `reader` access hides private-event details. Future: let the binding owner exclude private events so readers can collaborate. |
 | **google** | Google Calendar (`allVisible` availability) | **C** | In addition to the selected-calendar check, track foreign calendars whose free/busy data was successfully read and verify each observer can independently query their availability. |
 | **google** | Gmail Mailbox | **A** | Always throw. (Future: allow observers who independently have access, e.g. mailing-list members — explicitly out of scope now.) |
+| **google** | Google Chat Conversation / Thread | **B** | Check the observer's own account can open the bound space (`spaces.get`); for a conversation binding, also that it can list the space's members (`members.list`), since a space can restrict its member list to managers and the binding lists members. Everything else the binding reads — including the other participant's name on a direct message — comes from Chat's own space-scoped responses. |
+| **google** | Google Chat Account | **A** | Always throw. The binding spans the owner's direct messages and every conversation they belong to, so there is no one a collaborator could be verified against. Bind a single conversation to share. |
 | **google** | BigQuery | **C** | Track accessed datasets; verify the observer's IAM access to each. Dataset granularity for now (tables/columns later). |
 | **linear** | Team / Issue | **B** | Check the observer's workspace/team membership, honoring team privacy. |
 | **linear** | Workspace | **C** | Track accessed teams; verify the observer against each (reusing the Team B check). |
@@ -834,7 +849,10 @@ its resource types.
 | **confluence** | Space | **C** | Verify space access; track observed pages and blog posts because content restrictions may be narrower. |
 | **confluence** | Page / Blog Post | **C** | Verify bound-content access; track observed child pages because they may have stricter restrictions than their parent. |
 | **zoominfo** | Account | **A** | Always throw. The whole-account binding exposes licensed, entitlement-dependent and account-specific intelligence, and ZoomInfo provides no ACL oracle proving another account can read every historical result. |
-| **context** | Context Library singleton | **C** | Track observed collections; verify each is public in the sharing domain or privately owned by the observer's Context account. |
+| **context** | Context Library singleton | **C** | Track collections whose contents a read revealed (search results, a collection's listing, a document); verify each is public in the sharing domain or privately owned by the observer's Context account. Uses the kit's default observer cap to bound per-read verifier fanout. The top-level collection listing tracks nothing: its titles, descriptions and counts are discovery metadata the agent catalog already advertises unobserved. The denial never names the collection, which the refused collaborator cannot read. |
+| **x** | Account | **C** | Admit any observer with a working X connection: public posts, profiles, public Lists and follow graphs need only an X account. Reads private to the account -- bookmarks, likes, mute state, private Lists, and any page holding a protected account's post -- authorize against one synthetic `owner` collection, which admits only an observer connected as the same X user. |
+| **x** | Post / List | **C** | As Account, plus a check on every open that the observer's own X account can see the bound post or List (`canViewPost` / `canViewList`). Each check is a read billed to the observer's connection, so a passed check is trusted for an hour; a failed one never is. |
+| **x** | Profile | **C** | As Account: a public profile needs only an X account, and the `owner` collection covers a protected user's posts. Accepted over-permissiveness for every X binding: an author who has blocked the observer is still readable through the gadget, since checking each author per observer per read would cost a read each and what leaks is public. |
 
 ### 9.3 The "broad binding" lens
 
@@ -861,6 +879,11 @@ This is why the broad bindings split the way they do:
 - **Decomposition deliberately deferred → A:** Gmail Mailbox — could in principle decompose into
   mailing lists the observer belongs to, but that is the out-of-scope "advanced" case, so it stays
   fully private for now.
+- **Satisfies both but still A:** Google Chat Account — spaces have distinct ACLs and `spaces.get`
+  is a serviceable oracle, so C is technically available. It stays A because the binding also
+  reaches the owner's direct messages, where "can this collaborator open it too" has no useful
+  answer, and one stray DM read under C would lock the workspace for everyone anyway. Sharing is
+  done by binding a single conversation, which is the B row above.
 
 ---
 

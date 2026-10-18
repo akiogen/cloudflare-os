@@ -1,12 +1,10 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
-import { useKumoToastManager } from '@cloudflare/kumo'
+import { Banner, useKumoToastManager } from '@cloudflare/kumo'
 import { DownloadSimple, GitBranch, List } from '@phosphor-icons/react'
 import type {
   FileAtCommit, Overseer, WorkpieceId, WorkpieceSummary,
 } from '@gadgets/workshop-shared/api'
-import {
-  MAX_FILE_TEXT_LENGTH, type CodeChange, type FileChange, type TextChange,
-} from '@gadgets/workshop-shared/code-change'
+import type { CodeChange, FileChange, TextChange } from '@gadgets/workshop-shared/code-change'
 import { RpcStub } from 'capnweb'
 import FileBrowser, { isOpenableKind, type ExpandedDirs, type FileBrowserHandle } from './FileBrowser'
 import { WorkshopButton, WorkshopIconButton } from '../../components/WorkshopControls'
@@ -15,12 +13,12 @@ import CodeDiffEditor from './CodeDiffEditor'
 import type {
   ChatCodeChanges, ChatLiveChangeRows, ChatLiveEditPreviews, EditPreviewEvent,
 } from '../../ChatInterface'
-import { ChatOtClient, type RemoteFileEvent } from './otClient'
+import { ChatOtClient, type ChatContentReader, type RemoteFileEvent } from './otClient'
 import { commitFileStore, type CommitFileReader } from './commitFileStore'
-import { useCommitTree, useFilesAtCommit } from './useCommitContent'
+import { useChangedPaths, useCommitTree, useFilesAtCommit } from './useCommitContent'
 import {
-  EMPTY_BROWSER_TREE, browserTreePaths, buildBrowserTree, deriveChanges, type ChangedFile,
-  type FileChangeStatus,
+  EMPTY_BROWSER_TREE, browserTreePaths, buildBrowserTree, deriveChanges, mergedPathStatuses,
+  type ChangedFile, type FileChangeStatus,
 } from './workpieceTree'
 import { reportIssue } from '../../errorReporting'
 import { saveTextToFile } from '../../fileTransfers'
@@ -44,11 +42,14 @@ import { isTransientRpcError } from '../../rpcErrors'
 //    has been merged into the chat -- else the accepted commit. That is exactly what accepting
 //    would apply: a chat not updated from mainline diffs against its pin, so mainline's later
 //    commits never show up (accepting doesn't revert them, it is blocked until they are merged
-//    in); once updateChatFromMainline has imported them as rows, `mergedCommit` has advanced
-//    past the pin and those rows compare equal and vanish, rather than being listed as this
-//    chat's own changes. Accept requires `mergedCommit === head`, so where it is enabled the
-//    two agree.
-// The two coincide except for a gadget chat that has been updated from mainline. For a worktree
+//    in). Once updateChatFromMainline has merged them, the pin is rooted at the merge commit
+//    and `mergedCommit` is the head it merged, so what mainline changed compares equal and
+//    vanishes, rather than being listed as this chat's own changes. Accept requires
+//    `mergedCommit === head`, so where it is enabled the two agree.
+// The two coincide except for a gadget chat whose pin is rooted at a merge: one updated from
+// mainline, or made by applying a blueprint. The paths where they differ are listed by
+// Overseer.listChangedPaths(), which is how a file that only the merge changed reaches the
+// Changes list though the chat's content never touched it. For a worktree
 // they always coincide (it has no mainline), and in particular the worktree's own `headCommit`
 // -- the agent's last explicit commit -- plays no role: an agent that edits and immediately
 // commits still shows its work against the last *accepted* commit.
@@ -96,6 +97,9 @@ interface WorkpieceCodeInterfaceProps {
   isAgentActive: boolean
   isVisible?: boolean
   onHasCodeChange?: (hasCode: boolean) => void
+  // Hands out read access to the selected chat's uncommitted content (see ChatContentReader),
+  // and withdraws it with `undefined` when there is no chat to read.
+  onChatContentChange?: (content: ChatContentReader | undefined) => void
 }
 
 const NO_PENDING_GADGETS: ReadonlySet<WorkpieceId> = new Set()
@@ -210,7 +214,7 @@ function replaceSpanTextChange(
 export default function WorkpieceCodeInterface({
   overseer, summary, height = '100%', selectedChatId = null, chatChanges,
   liveRows, liveEditPreviews, pendingGadgetIds, streamingActiveFile, isAgentActive,
-  isVisible = true, onHasCodeChange,
+  isVisible = true, onHasCodeChange, onChatContentChange,
 }: WorkpieceCodeInterfaceProps) {
   const toasts = useKumoToastManager()
   const toastsRef = useRef(toasts)
@@ -232,6 +236,7 @@ export default function WorkpieceCodeInterface({
   const reader = useMemo<CommitFileReader>(() => ({
     listTree: commitId => overseer.listTree(commitId),
     readFilesAtCommit: (commitId, paths) => overseer.readFilesAtCommit(commitId, paths),
+    listChangedPaths: (fromCommit, toCommit) => overseer.listChangedPaths(fromCommit, toCommit),
   }), [overseer])
   const readerRef = useRef(reader)
   readerRef.current = reader
@@ -363,7 +368,7 @@ export default function WorkpieceCodeInterface({
                 activeOverlayRef.current = null
               }
               dispatchFileChange(event.gadgetId, event.path,
-                clientText !== undefined ? { set: clientText } : { remove: true })
+                typeof clientText === 'string' ? { set: clientText } : { remove: true })
               retryPreviewAttachRef.current?.()
               continue
             }
@@ -405,7 +410,7 @@ export default function WorkpieceCodeInterface({
               // client -- the incremental change's offsets are against the client's pre-row
               // content, not the previewed document -- and re-anchor the preview on top.
               dispatchFileChange(event.gadgetId, event.path,
-                text !== undefined ? { set: text } : { remove: true })
+                typeof text === 'string' ? { set: text } : { remove: true })
               retryPreviewAttachRef.current?.()
               continue
             }
@@ -442,6 +447,19 @@ export default function WorkpieceCodeInterface({
     : null
   const clientRef = useRef(client)
   clientRef.current = client
+
+  // Lend out the chat's content (see ChatContentReader). Read through the client at the time
+  // of asking, so that the answer includes edits which have yet to become a message.
+  useEffect(() => {
+    if (clientState === null || onChatContentChange === undefined) return
+    const { chatId, client: chatClient } = clientState
+    onChatContentChange({
+      chatId,
+      read: () => (chatClient.isReady() ? chatClient.snapshot() : undefined),
+      hasLocalEdits: () => chatClient.hasLocalEdits(),
+    })
+    return () => onChatContentChange(undefined)
+  }, [clientState, onChatContentChange])
 
   // Feed live rows to the client by subscribing to the chat's row stream: retained rows are
   // replayed at subscribe time (the client dedupes by (generation, revision)) and new rows
@@ -493,7 +511,7 @@ export default function WorkpieceCodeInterface({
       const files = client.getFiles(gadgetId)
       if (files !== undefined) {
         const text = files.get(path)
-        if (text !== undefined) return { text }
+        if (text !== undefined) return typeof text === 'string' ? { text } : {}
         if (client.getRemovedPaths(gadgetId).has(path)) return {}
       }
       if (gadgetId !== workpieceIdRef.current) return undefined
@@ -800,7 +818,7 @@ export default function WorkpieceCodeInterface({
   // chat's, or -- for a path the chat removed -- null. Undefined means the path is untouched
   // and its text is the content base's (readDisplayedText and the active-file resolution below
   // complete the picture).
-  const overlayText = (path: string): string | undefined | null => {
+  const overlayText = (path: string): ReturnType<import('./otClient').ChatContentSnapshot> => {
     const preview = previewOverrides.get(path)
     if (preview !== undefined) return preview
     if (chatFiles !== undefined) {
@@ -958,17 +976,42 @@ export default function WorkpieceCodeInterface({
     return buildBrowserTree(baseTree, present, removed)
   }, [baseTree, presentSignature, removedSignature])
 
-  // Statuses against the review base. Only touched paths can differ from it: an untouched path
-  // displays the content base's text, and every path where the review base differs from the
-  // content base was touched by the rows that imported the difference. A touched path whose
-  // review-base read is still in flight has no status yet; a removed one is listed as pending
-  // meanwhile (see deriveChanges), so that if the read fails the deletion candidate is still
-  // there to select and its pane shows the error and retry. `changes` is in path order.
+  // The paths where the content base differs from the review base, which a merge commit the
+  // chat is pinned at changed (see ChatGadgetPinState.mergedCommit). An untouched path displays
+  // the content base's entry, so these differ from the review base without the chat's content
+  // touching them; the two trees say how. Trees only: nothing here reads a file.
+  // A failed read leaves those files out of the Changes list, and a file the merge deleted is
+  // in no other listing, so the failure is shown with a retry that re-runs both reads.
+  const [mergedRetryToken, setMergedRetryToken] = useState(0)
+  const { paths: mergedPaths, error: mergedPathsError } = useChangedPaths(
+    reader, branchMode ? reviewBase : undefined, branchMode ? contentBase : undefined,
+    mergedRetryToken)
+  const { tree: reviewTree, error: reviewTreeError } = useCommitTree(
+    reader, mergedPaths !== null && mergedPaths.length > 0 ? reviewBase : undefined,
+    mergedRetryToken)
+  const mergedError = mergedPathsError ?? reviewTreeError
+  useEffect(() => {
+    if (mergedError === null) return
+    console.error('Failed to load the files a merge changed:', mergedError)
+    reportIssue('code-view.merged-changes', mergedError, { handled: true })
+  }, [mergedError])
+  const mergedStatuses = useMemo(
+    () => mergedPaths !== null && mergedPaths.length > 0 && baseTree !== null && reviewTree !== null
+      ? mergedPathStatuses(mergedPaths, baseTree, reviewTree)
+      : undefined,
+    [mergedPaths, baseTree, reviewTree])
+
+  // Statuses against the review base. A touched path compares its displayed text with the
+  // review base's; an untouched one can differ only where the merge changed it. A touched path
+  // whose review-base read is still in flight has no status yet; a removed one is listed as
+  // pending meanwhile (see deriveChanges), so that if the read fails the deletion candidate is
+  // still there to select and its pane shows the error and retry. `changes` is in path order.
   const isDiffMode = branchMode
   let fileChangeStatuses: Map<string, FileChangeStatus> | undefined
   let changes: readonly ChangedFile[] = NO_CHANGES
   if (isDiffMode) {
-    const derived = deriveChanges(touchedPaths, overlayText, reviewFiles, reviewBase !== undefined)
+    const derived = deriveChanges(
+      touchedPaths, overlayText, reviewFiles, reviewBase !== undefined, mergedStatuses)
     fileChangeStatuses = derived.statuses
     changes = derived.changes
   }
@@ -1043,6 +1086,8 @@ export default function WorkpieceCodeInterface({
   // while an agent turn is active (its edits stream into the same file), and until the chat's
   // content has loaded.
   const isEditingLocked = !branchMode || isAgentActive || !clientReady
+  // Outside a chat nothing on screen says why the code is read-only, so say how to unlock it.
+  const lockedHint = branchMode ? undefined : 'Select or start a conversation to edit'
 
   // Apply whole-file operations (create / delete / rename) as local changes. `set` and `remove`
   // need no base text; the seeding call matters for an unpinned gadget, which it makes part of
@@ -1099,7 +1144,7 @@ export default function WorkpieceCodeInterface({
         const files = client.getFiles(gadgetId)
         if (files !== undefined) {
           const text = files.get(path)
-          if (text !== undefined) return text
+          if (text !== undefined) return typeof text === 'string' ? text : undefined
           if (client.getRemovedPaths(gadgetId).has(path)) return undefined
         }
         const base = contentBaseRef.current
@@ -1169,7 +1214,7 @@ export default function WorkpieceCodeInterface({
   // unreadable).
   const readDisplayedText = async (filename: string): Promise<string | null> => {
     const overlaid = overlayText(filename)
-    if (overlaid !== undefined) return overlaid
+    if (overlaid !== undefined) return typeof overlaid === 'string' ? overlaid : null
     return readBaseText(filename)
   }
 
@@ -1205,14 +1250,16 @@ export default function WorkpieceCodeInterface({
     // Only a plain file can be renamed: the browser withholds the action from other kinds (see
     // FileBrowser for why an executable is among them), and this is the backstop.
     if (leafKindOf(oldName) !== 'file') return
+    if (!fileExists(oldName)) {
+      toasts.add({ title: 'File not found', variant: 'error' })
+      return
+    }
     if (fileExists(newName)) {
       toasts.add({ title: `File already exists: ${newName}`, variant: 'error' })
       return
     }
     const target = { client, gadgetId: workpieceId, contentBase }
-    const baseText = fileExists(oldName)
-      ? await readDisplayedText(oldName).catch(() => null)
-      : null
+    const baseText = await readDisplayedText(oldName).catch(() => null)
     // The read may have outlasted the selection: applyLocalFileChanges targets the *current*
     // gadget, and this rename belongs to the one it started on.
     if (target.client === null || clientRef.current !== target.client ||
@@ -1224,10 +1271,13 @@ export default function WorkpieceCodeInterface({
     // source text as the chat holds it *now* -- the read is only right while the path is still
     // untouched -- and refuse a destination that has since come to exist.
     const chatFilesNow = target.client.getFiles(target.gadgetId)
-    const text = chatFilesNow?.get(oldName) ??
-      (target.client.getRemovedPaths(target.gadgetId).has(oldName) ? null : baseText)
-    if (text === null) {
+    if (!chatFilesNow?.has(oldName) && target.client.getRemovedPaths(target.gadgetId).has(oldName)) {
       toasts.add({ title: 'File not found', variant: 'error' })
+      return
+    }
+    const text = chatFilesNow?.get(oldName) ?? baseText
+    if (typeof text !== 'string') {
+      toasts.add({ title: 'Only text files can be renamed in this editor', variant: 'error' })
       return
     }
     if (chatFilesNow?.has(newName) || fileExists(newName)) {
@@ -1322,18 +1372,18 @@ export default function WorkpieceCodeInterface({
   if (activeFile !== null) {
     const overlaid = overlayText(activeFile)
     if (overlaid !== undefined) {
-      activeResolved = overlaid !== null ? { kind: 'text', text: overlaid } : { kind: 'absent' }
+      activeResolved = overlaid === null ? { kind: 'absent' }
+        : typeof overlaid === 'string' ? { kind: 'text', text: overlaid }
+        : { kind: 'unreadable', message: 'Binary content cannot be displayed in the text editor.' }
     } else if (contentBase !== undefined) {
       activeResolved = activeBaseFiles.get(activeFile)
     }
   }
   const activeFileText = activeResolved?.kind === 'text' ? activeResolved.text : null
   // A base entry with no readable text (symlink, binary, oversized) shows its reason in place
-  // of content, read-only; a readable file beyond the change size cap is viewable but not
-  // editable, since no change could carry its new text.
+  // of content, read-only.
   const activeFileUnreadable = activeResolved?.kind === 'unreadable'
     ? activeResolved.message : null
-  const activeFileOversized = activeFileText !== null && activeFileText.length > MAX_FILE_TEXT_LENGTH
   // The diff's original side: the review base's text (null = absent there: an added file). The
   // diff waits for that read too, so a file never opens as "added" for the round trip before
   // its original arrives. An original with no readable text (a binary the chat replaced or
@@ -1401,6 +1451,7 @@ export default function WorkpieceCodeInterface({
             streamingActiveFile={streamingActiveFile}
             isDiffMode={isDiffMode}
             editLocked={isEditingLocked}
+            lockedHint={lockedHint}
             workpieceNoun={workpieceNoun}
             initialExpanded={expandedDirsByWorkpieceRef.current.get(workpieceId)}
             onExpandedChange={expanded => expandedDirsByWorkpieceRef.current.set(workpieceId, expanded)}
@@ -1463,6 +1514,22 @@ export default function WorkpieceCodeInterface({
               </WorkshopIconButton>
             )}
           </div>
+          {lockedHint && stableDisplayedFiles.length > 0 && (
+            <Banner size="sm" title={lockedHint} className="m-2 w-auto shrink-0" />
+          )}
+          {mergedError !== null && (
+            <Banner
+              variant="error"
+              size="sm"
+              title="Some of this draft's changes could not be loaded"
+              action={
+                <Banner.Action onClick={() => setMergedRetryToken(token => token + 1)}>
+                  Try again
+                </Banner.Action>
+              }
+              className="m-2 w-auto shrink-0"
+            />
+          )}
           <div className="min-h-0 flex-1">
             {stableDisplayedFiles.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center bg-kumo-base px-6 text-center">
@@ -1519,7 +1586,7 @@ export default function WorkpieceCodeInterface({
                 original={activeFileOriginal}
                 text={activeFileText}
                 session={activeSession}
-                readOnly={isEditingLocked || activeFileOversized}
+                readOnly={isEditingLocked}
                 height="100%"
               />
             ) : (

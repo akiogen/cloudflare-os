@@ -24,7 +24,11 @@ journals and caches require a named keyspace; and `connect()` can fence the OAut
 window. The observation "set" vocabulary is now "collection".
 
 The browser-bound completion page and reconnect credential escrow are shipped Layer-1 leaves used
-by production gatekeepers. Layer 2 remains unimplemented.
+by production gatekeepers. Layer 2 remains unimplemented. A 2026-10-05 pass over both corpora added
+the once-only `complete()` marker (§4.2), moved supabase, linear, spotify, zoominfo and
+homeassistant onto `./credential-expiry` (each latched before notifying, so one failed callback
+silenced expiry for good), capped homeassistant's and gatekeeper-mcp's connect-form reads with
+`readTextCapped`, and recorded the candidates it did not build in §11.
 
 Google consumes the preview OAuth leaf; Layer 2 (§5, the assembly) and §7 steps 8–16 are still
 proposal, so no gatekeeper has been ported to the assembly and none of §5's ergonomics have met a
@@ -62,7 +66,10 @@ layers**:
 
 The escape hatch is structural. A gatekeeper that outgrows the assembly implements the canonical
 `workshop-shared/gatekeeper` interfaces by hand and keeps using whatever leaf modules still fit;
-`packages/mcp-shared` already proves the two styles coexist in one repo.
+`packages/mcp-shared` already proves the two styles coexist in one repo. The same rule decides
+what the kit admits: it abstracts behavior several gatekeepers share under one contract, and
+gives an unusual gatekeeper plain TypeScript seams (hooks, callbacks, hand-written interfaces)
+rather than a variant shaped for one provider.
 
 Provider *policy* and shared *sequencing* are deliberately separated. The kit never decides what a
 provider error means or which scopes to request; it does own the order of operations — nonce
@@ -74,7 +81,7 @@ ironclad's generation counter in the internal repo), which is how sequencing bug
 ### v1 scope decisions (agreed)
 
 - **New package `@gadgets/gatekeeper-kit`**, private, non-deployable (no `wrangler.jsonc`).
-  `@gadgets/backend-utils` is not touched; it stays a logging/observability package with no
+  `@gadgets/observability` is not touched; it stays a logging/observability package with no
   `workshop-shared` dependency.
 - **Layer 2 parity goal: port `gatekeeper-supabase`** to the assembly, keeping every export name and
   the entire `wrangler.jsonc` (including migrations) byte-identical, and keeping live account DO
@@ -143,14 +150,14 @@ ironclad's generation counter in the internal repo), which is how sequencing bug
 ## 4. Layer 1: leaf modules
 
 Each module is a subpath export (`@gadgets/gatekeeper-kit/<name>`), mirroring
-`packages/mcp-shared/package.json`. Seven files are internal instead: `serial-queue` (§4.12);
+`packages/mcp-shared/package.json`. Six files are internal instead: `serial-queue` (§4.12);
 `action-journal` and `observer-tracker`, split out of `actions` and `observers` and reached through
 their owning subpaths; `positive-int` — one `requirePositiveInt` shared by every module that takes a
 bound; `kv` — the three KV surface slices the leaves name, since seven modules had begun to carry
-byte-identical structural copies; `single-flight` — the in-flight coalescer four leaves had
-hand-rolled, on the same reasoning as `serial-queue`; and `per-storage` — the
-process-local-value-per-storage-object helper behind credential refresh and notification
-single-flights and observer claim counts.
+byte-identical structural copies; and `per-storage` — the process-local-value-per-storage-object
+helper behind credential refresh and notification single-flights and observer claim counts.
+`single-flight`, the in-flight coalescer four leaves had hand-rolled, started internal on the same
+reasoning as `serial-queue` and is now exported for gatekeepers that coalesce their own writes.
 
 One spec discipline applies to every section below: a behavioral sentence must name the surface
 that carries it in the adjacent method list. Behavior with no named carrier is a spec bug (three
@@ -192,7 +199,8 @@ export const NONCE_KEY = "nonce";               // unchanged from every current 
 export type ConnectStage = "initiation" | "oauth";
 export type StoredNonce<Extra extends object = Record<never, never>> =
   TimedNonce & { stage: ConnectStage } & Extra;
-export function putInitiation(kv, initiationNonce: string, now: number): void;
+export function putInitiation<Meta extends object>(
+  kv, initiationNonce: string, now: number, meta?: Meta & NonceExtra): void;
 export function advanceToOAuth<Extra extends object>(
   kv, initiationNonce: string, now: number, extra?: Extra & NonceExtra): string | null;
 export function claimOAuth<Extra extends object>(
@@ -205,10 +213,31 @@ nonce in one synchronous step, so exactly one concurrent caller can advance a gi
 `Extra` fields (PKCE verifier, requested scopes). The stored shape matches the `StoredNonce` every
 existing OAuth gatekeeper writes (`mcp-shared` is the exception: `account.ts:118` also carries a
 `"connecting"` stage, which step 12 leaves in place). `Extra` stays flat rather than nested under a
-property; the reserved keys (`value`, `expiresAt`, `stage`) are intersected onto
-`advanceToOAuth`'s `extra` parameter, which both excludes them statically and rejects them at
-runtime. The exclusion lives on the parameter rather than the `Extra` constraint: as a constraint
+property; the reserved keys (`value`, `expiresAt`, `stage`) are intersected onto `putInitiation`'s
+`meta` and `advanceToOAuth`'s `extra` parameters, which both exclude them statically and reject them
+at runtime. The exclusion lives on the parameter rather than the `Extra` constraint: as a constraint
 it is a weak type, which defeats inference and collapses `StoredNonce<Extra>` to `never`.
+
+Initiation metadata records what a link was minted for, so a callback need not infer it: deriving
+"reconnect" from `stored() !== undefined` at callback time (GitLab's and X's original check)
+misroutes a reconnect whose account was disconnected meanwhile. `advanceToOAuth` carries it into
+the OAuth record, `extra` winning a name clash. Recording `firstConnect: true` at the connect entry
+point makes the absent value, a pre-deploy link included, take the safe staged path.
+
+```ts
+export function isConnectAttempted(kv): boolean;
+export function markConnectAttempted(kv): void;   // key "connectAttempted", as already stored
+```
+
+An account calls `GatekeeperConnectCallback.complete()` at most once. Each call stages another
+Workshop ticket (`stagePendingConnect`), and an unredeemed ticket revokes the account
+(`#dropPendingConnect`), so a second call can destroy the connection the first made, even one that
+threw or lost its reply. A flow that claimed a single-use nonce is already once-only; a link or form
+with none (internal gitlab, sentry, http, and eight more, plus `gatekeeper-shared`'s CF Access flow)
+checks early, then re-checks, writes the live credential, and marks in one synchronous section
+before awaiting `complete()`. Check and mark stay separate because every copy folds the check into a
+provider condition (an existing token, a live grant). The marker is never cleared; `deleteAll()` on
+revoke removes it with the account.
 
 ### 4.3 `./connect-pages`
 
@@ -242,7 +271,10 @@ HTML. A **missing** `Origin` is refused, not waved through: browsers send it on 
 absence means a non-browser caller on a URL whose whole authority is that a browser followed a
 link. This is the third copy of the same check — Marketo's `checkMutation`, and
 `workshop-backend/src/client-errors.ts:100-104` — and homeassistant, which accepts POSTs on its
-connect route, has none.
+connect route, has none. A page served `Referrer-Policy: no-referrer`, as `htmlResponse` pages are,
+submits its forms with `Origin: null` (checked in Chromium 154), so a guarded HTML form is served
+with `Referrer-Policy: same-origin`, which still keeps the bearer URL out of cross-origin `Referer`.
+`fetch()` posts keep their `Origin` under either policy, which is why Marketo's JSON flow works.
 
 The expected `origin` is **required and explicit** rather than derived from `req.url` (the shape
 client-errors uses): the form's action URL is built from the configured base URL, so the legitimate
@@ -293,7 +325,7 @@ RPC leaves a crash window in which the latch is set but nobody was notified, per
 silencing the account. With mark-on-success, the worst crash outcome is a duplicate notification,
 which the `GatekeeperConnectCallback` contract explicitly tolerates. Failures log `warn` with
 event `credentials.expiry.notify.failed` and the caller's `vendorId` via
-`@gadgets/backend-utils/logger` (component `"gatekeeper.connect"`). Existing stored `true` latch
+`@gadgets/observability/logger` (component `"gatekeeper.connect"`). Existing stored `true` latch
 values remain honored.
 `CredentialCoordinator.connect()` calls `clearCredentialExpiryLatch` itself before installing a new
 connection; the standalone export remains for hand-written account implementations.
@@ -1048,6 +1080,18 @@ keeps `claimed` out of `listUndecided` below, which converting the claim makes n
 They stay pending, fail at the provider if the effect never landed, and clear by rejection —
 exactly a corpus dependent whose creator never resolved.
 
+**A dependent is refused at submit once nothing can provide its reference.** The cascade scans
+submitted records, so a dependent submitted *after* its provider was rejected escaped it, and every
+apply then failed retryably on the unresolved reference — an auto-approvable one stopping the
+Workshop's in-order drain for every later action on the binding. By hand, Jira and cf-wiki only
+withhold auto-approval from a dependent whose reference will not resolve, and X's sessions refuse a
+temporary id whose pending action is gone. `submit` now asks, inside the submission lane so it
+cannot race the provider's own staging, whether each `dependsOn` reference is resolved
+(`isResolvedReference`) or provided by a pending or claimed record, and refuses the action before
+allocating otherwise. A provider decided in the one round trip while the dependent is being
+delivered escapes the cascade, which cannot see a staged record, so `submit` asks again once the
+dependent is submitted and fails it the way the cascade would have.
+
 `provides` and `dependsOn` return arrays, not `Iterable<string>`. Every one of those six cascades
 keys on a scalar string — confluence's `parentId`, notion's `pageId`, github's `targetId`, linear's
 `issueRef`, spotify's `playlistId`, cf-wiki's `provisionalId` — and `string` satisfies
@@ -1637,9 +1681,23 @@ silently, and `page * perPage` arithmetic then skips the rows between with no er
 reflect the rows it consumed — a server-side-filtered search with its own next signal, confluence's
 v1 CQL — is a `TokenCursor` carrying that signal as its token.
 
-There is no `overlay`, `map` or injected-item merging. Each came from one gatekeeper's shape, with
-ordering and authorization needs the others do not share. `retain` is the one post-fetch step left,
-and the ordering rule below is what keeps it from costing a page.
+`overlay` and `map` stay in each gatekeeper's `fetchPage`: each came from one gatekeeper's shape.
+Injected-item merging did not stay out. GitHub and GitLab each grew a near-identical
+`StreamingCursor` for it (overlay, injected rows merged by comparator, re-validation at serve time),
+and the copies drifted into opposite bugs — GitHub's served duplicate rows under concurrent
+`next()` and lost a page whose fetch threw, GitLab's walked a fully filtered listing to the end in
+one call. So `inject: { items, compare, revalidate?, identity? }` lives on the buffered base, where
+it inherits serialization, the fetch bound and the refusal hold. Injected rows are the agent's own
+simulation, not provider rows: they never reach `authorizePage`, and a page made only of them is
+not authorized. Only their position carries provider information — an injected row served first
+means no fetched provider row sorts ahead of it — which a listing whose order is itself sensitive
+covers by authorizing up front. `revalidate` and `identity` run when a row is served, not when it
+is fetched, and identities count as served only once their page is authorized. A refused page's
+retry rebuilds from the entries that page consumed, re-reading the injected ones, and stops before
+a provider row the refusal did not cover, such as one a dropped injected row had hidden: that row
+leads the next page, so it is neither lost nor slipped past the refusal.
+`retain` is the one post-fetch step for provider rows, and the ordering rule below is what keeps it
+from costing a page.
 
 Filtering is the exception, because a numeric walk has no end-of-list signal but the row count.
 The numeric cursors' `fetchPage` therefore returns the provider's page **unfiltered** and an optional
@@ -1656,15 +1714,16 @@ Three rules the prior art does not have. Only an **empty** provider page ends a 
 (providers cap page size below what was asked for — Cloudflare's own `/accounts` answers 20 to a
 request for 100 — so treating a short page as the end silently omits every later record). A page the
 caller sees nothing in is not the end either, so one `next()` fetches at most
-`MAX_PROVIDER_PAGES_PER_CALL` (10) pages — **every** page, not just consecutive empty ones, since a
-provider yielding one surviving row every few pages would otherwise cost hundreds of fetches in one
-call — and then yields what it has, `[]` included, which invites another call where `null` would
-claim the list had ended. The bound is latency, not quota: the fetches are sequential and the caller
-is blocked on them, while 10 still fills a 100-row page from a provider dropping 90% of what it
-returns. A short page is legal, so a port needing more per call raises `remotePageSize` rather than
-expecting one call to fill.
-And `next()` is serialized on a `SerialTaskQueue` (§4.12), since two un-awaited callers racing on the
-page counter would return one page twice and skip the next.
+`maxProviderPagesPerCall` (default 10) pages — **every** page, not just consecutive empty ones,
+since a provider yielding one surviving row every few pages would otherwise cost hundreds of fetches
+in one call — and then yields what it has, `[]` included, which invites another call where `null`
+would claim the list had ended. The default bound is latency, not quota: the fetches are sequential
+and the caller is blocked on them, while 10 still fills a 100-row page from a provider dropping 90%
+of what it returns. A short page is legal, so a port needing more per call raises `remotePageSize`
+rather than expecting one call to fill. A provider that bills each row it returns lowers it: `1`
+with a `pageSize` no provider page exceeds makes each `next()` one request. And `next()` is
+serialized on a `SerialTaskQueue` (§4.12), since two un-awaited callers racing on the page counter
+would return one page twice and skip the next.
 
 **Nothing latches a failure, because no paging state moves until every step that can throw has
 run.** `PageNumberCursor` and `OffsetCursor` decide exhaustion from the raw page and apply `retain`
@@ -1704,16 +1763,26 @@ Two rules follow from the token being opaque, and both belong to this class alon
 token, and the walk would otherwise re-fetch that page until a cap. Only the immediately-prior token
 is compared — an unbounded seen-set would grow with the walk it is meant to protect — and the first
 page, asked `undefined`, is exempt by construction. The refusal is stable and non-advancing, so a
-retry re-asks the same token and is refused again rather than losing the position. And a fixed
-shared `MAX_PROVIDER_PAGES_PER_CALL` bound of **10 provider pages** per `next()` call keeps a quiet
-stream from looping forever and also bounds sparse streams: every provider page counts, not just
-consecutive empty ones. At the bound `next()` returns the buffer *even when empty*, because `[]` is
-a legal non-terminal page (only `null` ends a `Cursor`) and the next call resumes the walk with a
-window. It is not an option: google's `CursorPager` hard-codes its own bound, internal cf-wiki loops
-unbounded (a hang on a broken provider), and nobody tunes it per resource. The numeric cursor needs
-no such bound, since an empty page ends its walk. Neither detects a provider that ignores the page
-argument and keeps answering with rows, which yields duplicates instead of ending; that needs an item
-identity the cursor does not have, and no page ceiling substitutes for one.
+retry re-asks the same token and is refused again rather than losing the position. And the
+`maxProviderPagesPerCall` bound keeps a quiet stream from looping forever and also bounds sparse
+streams: every provider page counts, not just consecutive empty ones. At the bound `next()` returns
+the buffer *even when empty*, because `[]` is a legal non-terminal page (only `null` ends a
+`Cursor`) and the next call resumes the walk with a window. It is an option rather than a constant
+because a provider that bills or rate-limits per request wants a lower one — google's own
+`CursorPager` exposes the same bound and Chat sets it to 3, and X's own cursor fetches one page per
+call because X bills every row a read returns — though no kit consumer lowers it yet. Neither
+cursor detects a provider that ignores the page argument and keeps answering with rows, which
+yields duplicates instead of ending; `inject.identity` dedups only what it is told is the same row,
+and no page ceiling substitutes for an identity.
+
+`PageHookCursor<T>` wraps a cursor the gatekeeper already built and runs `beforePage(items)` on each
+page before `next()` returns it — for listings that authorize their observation once, up front, so
+the hook acts on a page rather than authorizing it (GitHub and GitLab advertise each page's commit
+ids through it, with `advertisePages` from §4.22). It serializes `next()` on a `SerialTaskQueue`, and
+a hook that throws holds its page so the retry re-offers exactly it. It replaced github's
+`CommitAdvertisingCursor`, which did neither: an unserialized walk could interleave two callers, and
+a failed advertisement lost the page. `dispose?()` releases what the hook owns; the wrapped cursor
+is not disposed, so a provider cursor with its own `dispose` lease must not be wrapped until it is.
 
 ### 4.12 `./serial-queue` — internal
 
@@ -1885,6 +1954,8 @@ export function normalizeVendorEndpoint(raw: string, options: {
   label: string;                    // names the endpoint in the thrown message
   requireHttps?: boolean;           // default true
 }): string;                         // origin + normalized path; no query, userinfo or fragment
+export function pathSegment(value: string): string;
+export function pathSegments(value: string): string;
 ```
 
 For the operator-pasted endpoint an instance-hosted vendor needs (marketo's `<munchkin>.mktorest.com`,
@@ -1923,12 +1994,23 @@ query. mcp-shared's endpoint **blocklist** (`endpoint.ts:17-45`) is deliberately
 it is MCP-scoped SSRF defence with its own trust boundary, and moving it would churn shipped code
 for no new consumer.
 
+`pathSegment` and `pathSegments` are the other half of a provider URL: the agent-supplied ids
+interpolated into its path. `encodeURIComponent` leaves `.` and `..` literal, and WHATWG URL
+parsing resolves them (percent-encoded `%2e%2e` too), so an id of `..` climbs out of the route
+prefix it was placed in. They refuse `""`, `.` and `..` and encode everything else; `pathSegments`
+splits a `/`-separated name (a GitLab project path, a Chat media resource) and applies the same per
+segment, so a leading, trailing or doubled slash is refused as an empty segment. The id grammar
+(charset, length) stays the gatekeeper's, and the error echoes only the refused segment, at most
+two characters. Three internal copies disagreed (sentry refused any `..` substring, firstbase only
+exact dots, zip encoded `%2e`).
+
 ### 4.15 `./response-body`
 
 ```ts
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
 export class ResponseTooLargeError extends Error {}
-export function readTextCapped(response: Response, maxBytes?: number): Promise<string>;
+export function readTextCapped(response: Request | Response, maxBytes?: number): Promise<string>;
+export function readTextPrefix(body: Request | Response, maxBytes: number): Promise<string>;
 ```
 
 The one thing the competing `gatekeeper-factory-research` branch surfaced that belongs here — and it
@@ -1959,6 +2041,13 @@ origin-scoped headers when one crosses origins (`fetch.ts:142-209`), the factory
 refuses any redirect leaving its declared origin, and `normalizeVendorEndpoint` (§4.14) admits an
 operator-pasted vendor host. Those are three different trust boundaries, and a helper spanning them
 would have to expose knobs for exactly the policy it claims to centralize.
+
+`readTextPrefix` is the one exception to "refused rather than truncated", and is a separate export
+so the strict reader keeps its all-or-nothing contract. It decorates an error already being raised
+with the first `maxBytes` of the body — an HTML error page past the strict cap otherwise yields no
+excerpt at all — so it truncates, ignores `Content-Length`, cancels the rest, and never throws on
+the body: a used, locked or failing body returns what decoded, possibly `""`, because a read failure
+must not replace the provider error it was decorating.
 
 ### 4.16 `./preview-oauth`
 
@@ -2184,6 +2273,103 @@ reconnect overtook. Cloudflare is the first consumer, with an `isGrantDeath` wid
 error in a 4xx but 429, other than `invalid_client`, until live evidence shows what its token
 endpoint answers for a revoked grant. A 4xx without one, such as a WAF challenge, is never death.
 
+### 4.20 `./git-transport`
+
+```ts
+export function buildGitFetchRequest(oids: GitOid[], hints: GitPullHints): Uint8Array;
+export function pullGitPack(fetchUploadPack: (requestBody: Uint8Array) => Promise<Response>,
+  oids: GitOid[], hints: GitPullHints,
+  onTerminal?: (status: GitPullStatus) => void): Promise<ReadableStream<Uint8Array>>;
+export function validateBranchName(branch: string): string;
+export function pushGitRefUpdate(
+  fetchReceivePack: (requestBody: ReadableStream<Uint8Array>) => Promise<Response>,
+  update: GitRefUpdate, pack: ReadableStream<Uint8Array> | null): Promise<void>;
+export class GitRefUpdateRejectedError extends Error { readonly reason: string }
+export function emptyPackBytes(): Promise<Uint8Array>;
+export const ZERO_OID: string;
+export function simulateBranchHead(realHead: GitOid | null,
+  pushes: readonly { expectedOldSha: GitOid; newSha: GitOid }[]): GitOid | null;
+```
+
+Git smart-HTTP protocol v2 framing, moved verbatim from gatekeeper-github: pkt-line encoding and
+parsing, the `command=fetch` request, the sideband demultiplexer, and receive-pack's single-ref
+compare-and-swap with its report-status parsing. The gatekeeper's callback supplies the URL, the
+credentials, the timeouts and the protocol headers (`Git-Protocol: version=2` among them); the kit
+owns the bodies. A pre-receive refusal surfaces as `GitRefUpdateRejectedError.reason`, the server's
+own line, which the gatekeeper passes through. `filterSpecForHints` encodes GitHub's verified
+partial-clone limits; other servers may accept more. `simulateBranchHead` overlays a branch's
+queued ref updates on its real head by the same compare-and-swap rule, chain-following in any list
+order, so a simulated read and the next push's expected old sha agree; a push to `ZERO_OID`
+deletes, reading as `null`. Consumed by github and gitlab.
+
+The Workers-only `./git-pull-transfer` leaf wraps `pullGitPack` for the kernel-facing
+`Gatekeeper.gitPull(oids, options)` API:
+
+```ts
+export function startGitPull(fetchUploadPack: (requestBody: Uint8Array) => Promise<Response>,
+  oids: GitOid[], hints: GitPullHints): Promise<GitPullTransfer>;
+```
+
+`GitPullTransfer` exposes one-shot `stream()` and independent terminal `status()` so provider
+errors remain available if Workers RPC replaces a stream exception. Consumers must require
+`complete` after EOF, cancel unfinished streams, and dispose the capability. The provider does
+not parse packs, ingest cache objects, or impose the DO cache's size limit. The overseer routes
+pulls using recorded provenance, decodes the stream with its pack/object limits, and checks
+requested-object presence. The transport checks oid syntax, not advertisement history; the
+gatekeeper method is not gadget-facing. A separate kernel container-bootstrap consumer can use
+the stream directly with native Git and its own limits, but is not enabled by this helper alone.
+
+### 4.21 `./git-diff`
+
+```ts
+export type GitDiffFile = { path: string; previousPath?: string;
+  status: "added" | "modified" | "removed" | "renamed" | "copied";
+  additions: number; deletions: number; diffOmitted?: boolean; hunks: GitDiffHunk[] };
+export type TreeDiffFile = GitDiffFile & { status: "added" | "modified" | "removed" };
+export type TreeDiffSource = { getTree(oid: GitOid): Promise<GitTreeEntry[] | null>;
+  getBlob(oid: GitOid): Promise<Uint8Array | "unavailable"> };
+export function diffGitTrees(source: TreeDiffSource, oldTree: GitOid | null,
+  newTree: GitOid | null): Promise<TreeDiffFile[]>;
+export function changedPathsBetweenTrees(source: TreeDiffSource, oldTree: GitOid | null,
+  newTree: GitOid | null): Promise<string[]>;
+export function diffTextLines(oldText: string, newText: string):
+  { hunks: GitDiffHunk[]; additions: number; deletions: number };
+export function parseGitTreePayload(payload: Uint8Array, oid: GitOid): GitTreeEntry[];
+export function parseUnifiedPatch(patch: string): GitDiffHunk[];
+```
+
+A tree-to-tree diff over an injected `TreeDiffSource`, so a gatekeeper can simulate the diff of
+commits its provider has not received yet from the workspace's git cache. Output types are
+vendor-neutral; each gatekeeper's agent-facing `types.d.ts` keeps structurally identical copies
+(that text must stay self-contained). `MAX_DIFF_*` cap blob size, total bytes, and lines diffed per
+file, and `MAX_DIFF_OUTPUT_PER_FILE`/`MAX_DIFF_OUTPUT_TOTAL` cap the hunk text emitted, so a
+result stays under Durable Object storage's 2 MB value limit; a file past any cap reports
+`diffOmitted` and no hunks, and one past an output cap keeps its line counts. `parseUnifiedPatch`
+reads a provider's per-file patches into the same hunk shape, so simulated and provider diffs share
+one grammar; a patch's final newline ends its last line rather than starting a blank one. It does
+not enforce hunk line counts, so a multi-file diff must be split by file first.
+
+### 4.22 `./git-objects`
+
+```ts
+export function isCommitOid(value: string): boolean;
+export function parseGitCommitPayload(payload: Uint8Array, oid: GitOid): ParsedGitCommit;
+export function commitDetailsFromGitObject(oid: GitOid, payload: Uint8Array,
+  commitUrl: (oid: GitOid) => string): GitCommitDetails;
+export function advertiseCommits(advertiser: CommitAdvertiser, ids: Iterable<GitOid>,
+  options?: CommitAdvertisingOptions): Promise<void>;
+export function advertisePages<T>(advertiser: CommitAdvertiser,
+  commitIds: (item: T) => readonly GitOid[],
+  options?: CommitAdvertisingOptions): (items: readonly T[]) => Promise<void>;
+```
+
+Raw commit-object parsing and commit advertising. `commitUrl` is a callback because providers put
+the page in different places (`/commit/` on GitHub, `/-/commit/` on GitLab). `advertisePages` is
+the `PageHookCursor` hook for git listings: an id counts as advertised only once its advertisement
+lands, so a failed page is advertised in full when re-offered. `withhold` names ids the remote
+cannot supply yet — simulated heads of queued pushes — and is consulted per batch, so a push queued
+mid-walk is honoured.
+
 ## 5. Layer 2: the assembly
 
 **Layer-1 reconciliation, 2026-09-05 — the leaf contracts this section now builds on.** Observation
@@ -2398,7 +2584,9 @@ everything else rethrows untouched. A config with provider evidence widens that 
 ### 5.4 `./auth-token`
 
 `tokenAuth<Creds, E>(config)` for user-pasted secrets (the shape internal gatekeepers like sentry
-need): `begin` returns `{ html }` — a minimal form styled with `PAGE_STYLE`, fields from
+need): `begin` returns `{ html }` — a minimal form styled with `PAGE_STYLE` and served with
+`Referrer-Policy: same-origin` (under `htmlResponse`'s `no-referrer` the browser sends
+`Origin: null` and every submission 403s, §4.3), fields from
 `config.fields: { name, label, secret?: boolean }[]`, a hidden `state`, posting to
 `${baseUrl}/connect/${accountId}`; `routes` handles that POST, first calls
 `connectMutationError(req, { origin: baseUrl, contentType: "application/x-www-form-urlencoded" })`
@@ -2795,7 +2983,7 @@ Each step leaves the tree building; tests land with the module they cover. Nothi
    `test:run: "vitest run && vitest run -c vitest.worker.config.ts"`,
    `test:watch:node: "vitest"`, and
    `test:watch:workerd: "vitest -c vitest.worker.config.ts"`; dependencies
-   `@gadgets/workshop-shared` and `@gadgets/backend-utils` (`workspace:*`) plus `jose`; devDependencies
+   `@gadgets/workshop-shared` and `@gadgets/observability` (`workspace:*`) plus `jose`; devDependencies
    `@cloudflare/vitest-pool-workers`, `@cloudflare/workers-types`, `typescript`, and `vitest`
    (`catalog:`) plus `@gadgets/scripts` (`workspace:*`)). `build` (`tsc`) and `clean`
    (`rm -rf dist`, uncached) are Vite+ tasks, not package scripts. As landed the
@@ -3168,17 +3356,17 @@ preserved so the work is additive when its trigger port lands. Each entry names 
 evidence, and the trigger.
 
 - **Expiry-derived consumer credential cache** behind `CredentialSource`'s `get`/`run` surface.
-  Google caches a fetched token until expiry − 60s (`google/src/auth-retry.ts:181-213`) and slack
-  until expiry − 300s (`slack.ts:510-519`) — freshness derived from the credential rather than a
-  fixed TTL. *Trigger:* the google or slack port. Add an `expiresAt`-aware variant rather than
-  reintroducing a TTL knob; it needs an `expiresAt` projection the stored/public credential split
-  does not carry today (§4.6).
-- **Split-key handshake variant** behind the `putInitiation`/`advanceToOAuth`/`claimOAuth`
-  operations. Internal ironclad stores `initiationNonce` and `oauthNonce` under two keys
-  (`ironclad.ts:129-131,1634-1692`) where the kit uses one `nonce` record. *Trigger:* the ironclad
-  port — either a variant module or a one-time key migration. Salesforce
-  (`salesforce.ts:150-152,1210-1269`) already matches the kit shape exactly, PKCE verifier in the
-  record.
+  Google caches a fetched token until expiry − 60s (`google/src/auth-retry.ts`, `AccessTokenCache`)
+  and slack until expiry − 300s (`slack.ts`, `ACCESS_TOKEN_EXPIRY_SAFETY_MS`) — freshness derived
+  from the credential rather than a fixed TTL. *Trigger:* the google or slack port. Add an
+  `expiresAt`-aware variant rather than reintroducing a TTL knob; it needs an `expiresAt`
+  projection the stored/public credential split does not carry today (§4.6).
+- **Split-key handshake layout.** Internal ironclad stores `initiationNonce` and `oauthNonce` under
+  two keys (`ironclad.ts:129-131,1634-1692`) where the kit uses one `nonce` record. That is one
+  gatekeeper's layout, not a second contract, so the kit adds no variant for it. *Trigger:* the
+  ironclad port, which either migrates its keys once or keeps its hand-written handshake.
+  Salesforce (`salesforce.ts:150-152,1210-1269`) already matches the kit shape exactly, PKCE
+  verifier in the record.
 - **Per-action-id claim serialization** as an alternative to the facet's global `SerialTaskQueue`.
   The durable claim itself is now in the journal (§4.8, `claimBeforeApply`); what stays deferred is
   its granularity. `mcp-shared` stamps `applying` synchronously before awaiting
@@ -3192,7 +3380,12 @@ evidence, and the trigger.
   idempotency key and lookup by it — 0 of 15 live writers probe today, and three independently chose
   the manual-check message instead (`mcp-shared/src/action-store.ts:43-46`,
   `ironclad.ts:916-931`, and the kit). Half the work is already done: `ActionContext.id` is the
-  stable key such a probe would look up.
+  stable key such a probe would look up. Reviewed again and still deferred: X, the one candidate,
+  has neither (its probe matches recent posts by text inside a time window), Google Chat sets
+  `requestId` and needs no claim at all, and internal Jira and Salesforce refuse the retry, which
+  `claimBeforeApply` already does. A probe keyed on a gatekeeper's own attempt marker also misreads
+  the gap between the provider's success and the journal's applied record: the marker is cleared
+  first, so a crash there reads as absent and dispatches again.
 - **A `reverting` marker** for the retained tier, so an interrupted compensating call is
   distinguishable from a completed one. No gatekeeper in either corpus persists one, which is why
   all 11 functional reverts are silently replayable; the kit already owns the right primitive in
@@ -3203,8 +3396,54 @@ evidence, and the trigger.
   `OAuthClientOptions`. The internal Access client discovers its endpoints and registers itself,
   then speaks the same token protocol `./oauth-client` implements (§4.19); discovery would produce
   the endpoints and DCR the `OAuthClientAuth`, and a registered client is the case where
-  `invalid_client` is evidence for `isGrantDeath`. *Trigger:* the internal Access port, whose
-  submodule bump also migrates the internal OAuth gatekeepers to the connect handoff.
+  `invalid_client` is evidence for `isGrantDeath`. Only Access needs this outside the MCP SDK, so
+  until a second gatekeeper does, the Access port discovers and registers on its own and passes the
+  results into `OAuthClientOptions`. No kit change is needed for that. *Trigger:* a second
+  gatekeeper needing discovery or registration outside the MCP SDK.
 - **Already realized** (orientation only, no work): the `ObserverStrategy` A–D wrappers behind one
   interface; `ArrayCursor`/`PageNumberCursor`/`OffsetCursor`/`TokenCursor` behind `Cursor<T>`; and
   Layer 2's `AuthStrategy` (`oauth2` / `tokenAuth`) — the same doctrine at the auth seam.
+
+## 11. Candidate leaves reviewed and not built
+
+The 2026-10-05 pass looked for provider-independent plumbing the kit lacks. The leaf candidates are
+behavior several gatekeepers share that does not yet justify a leaf. Behavior only one gatekeeper
+has is not a candidate (§1). The first entry is different: it is a guard in the Workshop kernel,
+recorded here because the pass found it. Each entry names why it waits and what would revive it.
+
+- **Workshop-side once-only `complete()`.** The kernel could refuse a second `stagePendingConnect`
+  for one account id and protect every gatekeeper at once. No gatekeeper reaches a second
+  `complete()` today (§4.2). The guard would have to reserve the id synchronously, before
+  `describe()` is awaited, or two concurrent calls both pass it. *Trigger:* a gatekeeper found able
+  to call `complete()` twice.
+- **Connect-form reader** in `./connect-pages`. Homeassistant and gatekeeper-mcp read their forms
+  through `readTextCapped` (16 KiB): each route reads the body before the account checks the nonce,
+  so anyone holding one connect URL could otherwise buffer a request body as large as the plan
+  allows (5 GB on Enterprise) into a 128 MB isolate. Internal sentry and http still call
+  `formData()`. A kit reader would pair the cap with `connectMutationError`, but that guard does not
+  fit mcp's `htmlResponse` form (§4.3). *Trigger:* `tokenAuth` (§5.4), which owns the form read.
+- **Token memo** for `withAuthRetry`'s `getToken({ forceRefresh, staleToken })`. Zylo, the only
+  production caller, ignores `staleToken` and does not coalesce: redundant mints, not wrong
+  results, and `SingleFlight` fixes it locally. Google coalesces at the account (§4.13). *Trigger:*
+  a second consumer outside `CredentialSource`.
+- **`Retry-After` parser.** Slack, Google, Cloudflare observability and internal Jira parse it under
+  different fallbacks and caps; internal Zip and NetSuite pass it through. *Trigger:* the next
+  hand-written retry loop.
+- **Hook delivery** (`startHook`, observe, deliver, dispose). Only email and scheduler produce hooks,
+  with different policies. *Trigger:* a third producer.
+- **Resource-pattern scope helpers.** Cloudflare, Google, Slack and internal Ironclad each model the
+  granted scope differently, so there is no shared contract yet. *Trigger:* a second gatekeeper
+  that records requested and granted scopes the way Google does.
+- **Git push simulation, remainder.** `parseUnifiedPatch` (`./git-diff`) and `simulateBranchHead`
+  (`./git-transport`) were extracted, and `SessionGitCache` already lived in `./cursors`. What stays
+  per gatekeeper is entangled with provider APIs and durable action records: the pending-chain walk
+  (GitHub probes each commit, GitLab splits side ancestry and asks `/merge_base`; both list first
+  parents only), tree comparison, push refusal wording, rollback, and the rejected-push cascade.
+  Two GitHub gaps remain local fixes, not kit work: rollback drops the receive-pack reason, and
+  rejection does not cascade through stacked pushes as GitLab's `#rejectActionsStrandedByPush`
+  does. *Trigger:* a third git gatekeeper, or a pure chain walker returning `{ firstParent, pending,
+  frontier }` that both can call.
+
+Rejected: a `clientCredentials()` grant (`OAuthClient.request("token", …)` covers both instances, and
+Zylo returns `expires_on`), streaming `ActionFileStore` capture (no Drive upload exists), and a
+general retry executor (the policies differ, not the loops).

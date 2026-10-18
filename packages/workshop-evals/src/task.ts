@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import type { AgentTurnOutcome } from "@gadgets/integration-tests/agent-session";
 import type { JsonValue } from "vitest-evals";
+import { z } from "zod";
 import type { EvalVerifier } from "./verifier.js";
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.json();
+
+/** Anything JSON-serialisable, as check evidence, with a type that says so. */
+export function asEvidence(value: unknown): JsonValue {
+  return JsonValueSchema.parse(JSON.parse(JSON.stringify(value)));
+}
 
 export type EvalCheckOutcome = {
   pass: boolean;
@@ -14,7 +22,22 @@ export type EvalCheck = {
   evidence?: JsonValue;
 };
 
+/** An Agent Skill the user writes in their Skills library. */
+export type EvalSkill = {
+  /**
+   * Its name, also its directory: lowercase letters and digits, in words joined by single hyphens,
+   * at most 64 characters.
+   */
+  name: string;
+  /** What it is for, at most 1024 characters, which the Skills catalog shows the agent. */
+  description: string;
+  /** The body of its SKILL.md, after the frontmatter. */
+  instructions: string;
+};
+
 export type EvalTurn = {
+  /** Skills the user adds to their Skills library before sending `prompt`, turning Skills on. */
+  skills?: readonly EvalSkill[];
   prompt: string;
   verify(verifier: EvalVerifier): Promise<void>;
   /** Commit this turn, reload its Gadgets, then run these checks. */
@@ -37,9 +60,11 @@ export function defineEvalTask(task: EvalTask): EvalTask {
   return task;
 }
 
-/** Hash the prompts that define what the agent was asked to do. */
+/** Hash what the agent was asked to do: each turn's prompt and the skills it adds. */
 export function taskVersion(task: EvalTask): string {
-  return createHash("sha256").update(JSON.stringify(task.turns.map(turn => turn.prompt))).digest("hex");
+  return createHash("sha256")
+      .update(JSON.stringify(task.turns.map(({ prompt, skills }) => ({ prompt, skills }))))
+      .digest("hex");
 }
 
 export type EvalRunInput = {

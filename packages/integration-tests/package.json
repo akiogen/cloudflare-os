@@ -12,15 +12,16 @@
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "test:prebuild": "vp run -F @gadgets/integration-tests build:test-gatekeeper && vp run -F @gadgets/integration-tests build:blos-email-gatekeeper",
+    "test:prebuild": "vp run -F @gadgets/integration-tests build:test-gatekeeper && vp run -F @gadgets/github-gatekeeper build:integration-worker && vp run -F @gadgets/google-gatekeeper build:integration-worker && vp run -F @gadgets/gatekeeper-context build:integration-worker && vp run -F @gadgets/integration-tests build:upgrade-base && vp run -F @gadgets/integration-tests build:blos-email-gatekeeper",
     "test:run": "pnpm run test:prebuild && vitest run",
     "test:watch": "pnpm run test:prebuild && vitest"
   },
   "dependencies": {
+    "@gadgets/gatekeeper-kit": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "catalog:",
     "jsonc-parser": "^3.3.1",
-    "zod": "^4.5.4"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",

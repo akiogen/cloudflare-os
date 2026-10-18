@@ -1,4 +1,5 @@
 import { defineConfig, loadEnv } from 'vite'
+import { configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import tsconfigPaths from 'vite-tsconfig-paths'
@@ -11,16 +12,18 @@ import { vitestTask } from '@gadgets/scripts/vitest-task'
 // pattern matching every package's `dist` would drop a real input.
 const frontendBundleTaskOptions = {
   dependsOn: ['clean:dist'],
-  env: ['VITE_*'],
-  input: [
-    { auto: true },
-    { pattern: '!dist/**', base: 'package' } as const,
-    // Wrangler's scratch bundles are randomly named, and tracking reaches past the package that
-    // owns the task, so any sibling that ran `wrangler dev` guarantees a miss here. Workspace-wide
-    // for that reason; `build:app` and the shared `test` task exclude the same tree.
-    { pattern: '!**/.wrangler/**', base: 'workspace' } as const,
-  ],
-  output: ['dist/**'],
+  cache: {
+    env: ['VITE_*'],
+    input: [
+      { auto: true },
+      { pattern: '!dist/**', base: 'package' } as const,
+      // Wrangler's scratch bundles are randomly named, and tracking reaches past the package that
+      // owns the task, so any sibling that ran `wrangler dev` guarantees a miss here. Workspace-wide
+      // for that reason; `build:app` and the shared `test` task exclude the same tree.
+      { pattern: '!**/.wrangler/**', base: 'workspace' } as const,
+    ],
+    output: ['dist/**'],
+  },
 }
 
 const ownDist = { pattern: '!dist/**', base: 'package' } as const
@@ -35,15 +38,15 @@ const runConfig = {
         cache: false,
       },
       /**
-       * `build` is a task rather than a package.json script so `env` can declare the `VITE_*` flags
-       * it reads: a cached `vp` run executes scripts in a clean environment, and the values would be
-       * missing from the fingerprint besides. `VITE_CF_ACCESS_MODE` is inlined into the bundle
-       * (`src/useAuth.ts`) and `VITE_FRONTEND_ERROR_REPORTING` selects hidden source maps below, so
-       * replaying a bundle built under different values is wrong rather than merely stale.
+       * `build` is a task rather than a package.json script so `cache.env` can declare the `VITE_*`
+       * flags it reads: a cached `vp` run executes scripts in a clean environment, and the values
+       * would be missing from the fingerprint besides. `VITE_CF_ACCESS_MODE` is inlined into the
+       * bundle (`src/useAuth.ts`) and `VITE_FRONTEND_ERROR_REPORTING` selects hidden source maps
+       * below, so replaying a bundle built under different values is wrong rather than merely stale.
        *
-       * Separate commands rather than one `&&` string so each is a cache entry of its own; `env` is
-       * task-wide, so changing a flag re-runs all three anyway. `tsconfig.vite.json` is the
-       * config-file pass (`vite.config.ts` and the scripts it imports), which the app's own
+       * Separate commands rather than one `&&` string so each is a cache entry of its own;
+       * `cache.env` is task-wide, so changing a flag re-runs all three anyway. `tsconfig.vite.json`
+       * is the config-file pass (`vite.config.ts` and the scripts it imports), which the app's own
        * `tsconfig.json` excludes.
        *
        * Production mode is set before Vite is imported because Vite snapshots whether `NODE_ENV`
@@ -57,7 +60,8 @@ const runConfig = {
         command: viteBuildCommand,
         ...frontendBundleTaskOptions,
       },
-      test: vitestTask('vitest run', [ownDist]),
+      // The browser suite second, under its own config (see vitest.browser.config.ts).
+      test: vitestTask(['vitest run', 'vitest run -c vitest.browser.config.ts'], [ownDist]),
     },
   },
 }
@@ -81,9 +85,14 @@ export default defineConfig(({ mode }) => {
       host: true,
       proxy: {
         '/api/client-errors': `http://${backendHost}`,
+        '/api/device-session/callback': `http://${backendHost}`,
         '/blueprint-screenshot': `http://${backendHost}`,
         '/api/site-logo': `http://${backendHost}`,
       },
+    },
+    test: {
+      // Chromium's, under vitest.browser.config.ts.
+      exclude: [...configDefaults.exclude, 'src/**/*.browser.test.tsx'],
     },
     build: {
       // Production reporting uploads these separately; hidden maps never reveal a map URL to users.

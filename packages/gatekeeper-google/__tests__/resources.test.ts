@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  BIGQUERY_RESOURCE, GMAIL_RESOURCE, GOOGLE_CALENDAR_RESOURCE, GOOGLE_DOC_RESOURCE,
+  BIGQUERY_RESOURCE, GMAIL_RESOURCE, GOOGLE_CALENDAR_RESOURCE, GOOGLE_CHAT_RESOURCE,
+  GOOGLE_CHAT_SPACE_RESOURCE, GOOGLE_CHAT_THREAD_RESOURCE, GOOGLE_DOC_RESOURCE,
   GOOGLE_DRIVE_FILE_RESOURCE, GOOGLE_DRIVE_FOLDER_RESOURCE, GOOGLE_DRIVE_RESOURCE,
-  GOOGLE_SHEETS_RESOURCE, IDENTITY_SCOPES, LEGACY_GRANTED_RESOURCE_URL_PATTERNS,
-  RESOURCE_BY_KIND, RESOURCE_SCOPES, SCOPE_DERIVED_RESOURCE_URL_PATTERNS, SUPPORTED_RESOURCES,
-  grantedResourceUrlPatterns, hasDriveResourceGrant, parseResourceUrl,
+  GOOGLE_SHEETS_RESOURCE, GOOGLE_SLIDES_RESOURCE, IDENTITY_SCOPES,
+  LEGACY_GRANTED_RESOURCE_URL_PATTERNS, OFFICE_IMPORT_GRANT, RESOURCE_BY_KIND, RESOURCE_SCOPES,
+  SCOPE_DERIVED_RESOURCE_URL_PATTERNS, SUPPORTED_RESOURCES, creatableKind,
+  grantedResourceUrlPatterns, hasDriveResourceGrant, isPrivateGrant,
+  nativeFileUrl, parseResourceUrl,
   recordedResourceUrlPatterns, resourceUrlPatternsToOAuthScopes, resourcesCoveredByScopes,
   validateResourceUrlPatterns,
 } from "../src/resources";
@@ -27,20 +30,16 @@ describe("resource declarations", () => {
       "https://mail.google.com/*",
       "https://docs.google.com/document/d/:docId/*",
       "https://docs.google.com/spreadsheets/d/:spreadsheetId/*",
+      "https://docs.google.com/presentation/d/:presentationId/*",
       "https://calendar.google.com/calendar/:calendarId/*",
       "https://drive.google.com/drive/my-drive",
       "https://drive.google.com/drive/folders/:folderId",
       "https://drive.google.com/file/d/:fileId/view",
+      "https://chat.google.com/",
+      "https://chat.google.com/:kind(room|dm)/:spaceId",
+      "https://chat.google.com/:kind(room|dm)/:spaceId/:threadId{/:messageId}?",
       "https://bigquery.googleapis.com/:projectId/*",
     ]);
-  });
-
-  it("describes the whole-account Drive authority exactly", () => {
-    expect(GOOGLE_DRIVE_RESOURCE.description).toBe(
-      "Find files and folders anywhere this Google account can read in Drive, including shared " +
-      "drives. Full-text search examines indexed file content, descriptions, and OCR text; search " +
-      "results contain metadata only, while native Google Docs and Sheets can be opened read-only.",
-    );
   });
 
   it("advertises one batched Calendar connection for scheduling", () => {
@@ -49,6 +48,13 @@ describe("resource declarations", () => {
       "using https://calendar.google.com/calendar/primary/?availability=allVisible, then call " +
       "checkAvailability once with up to 50 attendee email addresses. Do not request each " +
       "attendee's calendar.",
+    );
+  });
+
+  it("advertises Sheets value, tab, row, column and formatting changes", () => {
+    expect(GOOGLE_SHEETS_RESOURCE.description).toBe(
+      "Read the values and formatting of a spreadsheet you choose, and change its values, tabs, " +
+      "rows, columns, and formatting, with your approval.",
     );
   });
 
@@ -87,19 +93,38 @@ describe("resource declarations", () => {
     expect(new Set(Object.values(RESOURCE_BY_KIND)).size).toBe(SUPPORTED_RESOURCES.length);
   });
 
-  it("advertises native Docs and Sheets only on Drive resources", () => {
-    expect([
-      GOOGLE_DRIVE_RESOURCE.description,
-      GOOGLE_DRIVE_FOLDER_RESOURCE.description,
-      GOOGLE_DRIVE_FILE_RESOURCE.description,
-    ]).toEqual([
-      "Find files and folders anywhere this Google account can read in Drive, including shared " +
-      "drives. Full-text search examines indexed file content, descriptions, and OCR text; search " +
-      "results contain metadata only, while native Google Docs and Sheets can be opened read-only.",
-      "Browse a selected folder or shared drive, search its direct children, and read native " +
-      "Google Docs and Sheets.",
-      "Read metadata and, for a native Google Doc or Sheet, content from one Drive file.",
-    ]);
+  // The gatekeeper is deliberately a user-authenticated Chat client: `chat.bot` and the
+  // `chat.app.*` family would make it post as a configured Chat app instead of as the person,
+  // `chat.admin.*` would reach conversations the connected user cannot open, and `chat.import`
+  // and `chat.delete` are destructive surfaces the session never exposes. Memberships are
+  // read-only because the session offers no way to change them, and the account may create
+  // conversations but not reconfigure them, so it never holds the full `chat.spaces`.
+  it("requests only user-authentication Chat scopes, with account-only extras", () => {
+    const conversation = [
+      "https://www.googleapis.com/auth/chat.spaces.readonly",
+      "https://www.googleapis.com/auth/chat.messages",
+      "https://www.googleapis.com/auth/chat.memberships.readonly",
+    ];
+    const accountOnly = [
+      "https://www.googleapis.com/auth/chat.users.readstate.readonly",
+      "https://www.googleapis.com/auth/chat.spaces.create",
+      "https://www.googleapis.com/auth/directory.readonly",
+    ];
+    for (const [resource, expected] of [
+      [GOOGLE_CHAT_RESOURCE, [...conversation, ...accountOnly]],
+      [GOOGLE_CHAT_SPACE_RESOURCE, conversation],
+      [GOOGLE_CHAT_THREAD_RESOURCE, conversation],
+    ] as const) {
+      const scopes = RESOURCE_SCOPES.find(entry => entry.resource === resource)!.scopes;
+      expect(scopes).toEqual(expected);
+      for (const forbidden of ["chat.bot", "chat.app.", "chat.admin.", "chat.import", "chat.delete"]) {
+        expect(scopes.some(scope => scope.includes(forbidden))).toBe(false);
+      }
+    }
+    const chatPatterns = [GOOGLE_CHAT_RESOURCE, GOOGLE_CHAT_SPACE_RESOURCE, GOOGLE_CHAT_THREAD_RESOURCE]
+      .map(resource => resource.urlPattern);
+    expect(resourcesCoveredByScopes(chatPatterns, conversation))
+      .toEqual([GOOGLE_CHAT_SPACE_RESOURCE.urlPattern, GOOGLE_CHAT_THREAD_RESOURCE.urlPattern]);
   });
 
   it("matches the natural folder URL only to the folder resource", () => {
@@ -136,21 +161,59 @@ describe("resourceUrlPatternsToOAuthScopes", () => {
       "https://www.googleapis.com/auth/drive.metadata.readonly",
       "https://www.googleapis.com/auth/documents.readonly",
       "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/presentations.readonly",
     ]],
     [GOOGLE_DRIVE_FOLDER_RESOURCE, [
       "https://www.googleapis.com/auth/drive.metadata.readonly",
       "https://www.googleapis.com/auth/documents.readonly",
       "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/presentations.readonly",
     ]],
     [GOOGLE_DRIVE_FILE_RESOURCE, [
       "https://www.googleapis.com/auth/drive.metadata.readonly",
       "https://www.googleapis.com/auth/documents.readonly",
       "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/presentations.readonly",
     ]],
   ] as const)("pins the permanent scopes for $urlPattern", (resource, scopes) => {
     expect(resourceUrlPatternsToOAuthScopes([resource.urlPattern])).toEqual([
       ...IDENTITY_SCOPES, ...scopes,
     ]);
+  });
+
+  it("asks a directly bound spreadsheet for the Sheets write scope", () => {
+    expect(resourceUrlPatternsToOAuthScopes([GOOGLE_SHEETS_RESOURCE.urlPattern])).toEqual([
+      ...IDENTITY_SCOPES,
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+    ]);
+  });
+
+  // A direct Sheets binding writes, so a connection holding only spreadsheets.readonly must read
+  // as ungranted, and the Workshop prompts for the wider scope, while a reconnect still asks for
+  // the resource it recorded.
+  it("re-prompts a direct Sheets grant that holds only spreadsheets.readonly", () => {
+    const grant = {
+      resourceUrlPatterns: [GOOGLE_SHEETS_RESOURCE.urlPattern],
+      oauthScopes: [
+        ...IDENTITY_SCOPES,
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+      ],
+    };
+    expect(grantedResourceUrlPatterns(grant)).toEqual([]);
+    expect(recordedResourceUrlPatterns(grant)).toEqual([GOOGLE_SHEETS_RESOURCE.urlPattern]);
+  });
+
+  // Drive resources only read spreadsheets, so the direct Sheets binding's wider scope covers them.
+  it("covers a Drive resource's spreadsheets.readonly with a spreadsheets grant", () => {
+    expect(resourcesCoveredByScopes([GOOGLE_DRIVE_FILE_RESOURCE.urlPattern], [
+      ...IDENTITY_SCOPES,
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+      "https://www.googleapis.com/auth/documents.readonly",
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/presentations.readonly",
+    ])).toEqual([GOOGLE_DRIVE_FILE_RESOURCE.urlPattern]);
   });
 
   it("requires account and file grants to expand beyond metadata-only consent", () => {
@@ -164,6 +227,24 @@ describe("resourceUrlPatternsToOAuthScopes", () => {
     ]);
     expect(granted).toEqual([]);
   });
+
+  // Drive-native Slides added presentations.readonly to every Drive resource. A connection made
+  // before it must read as ungranted, so the Workshop prompts for it, while a reconnect still asks
+  // for the resource it recorded.
+  it("re-prompts a Drive grant made before Drive resources read Slides", () => {
+    const grant = {
+      resourceUrlPatterns: [GOOGLE_DRIVE_FOLDER_RESOURCE.urlPattern],
+      oauthScopes: [
+        ...IDENTITY_SCOPES,
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+        "https://www.googleapis.com/auth/documents.readonly",
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+      ],
+    };
+    expect(grantedResourceUrlPatterns(grant)).toEqual([]);
+    expect(recordedResourceUrlPatterns(grant)).toEqual([GOOGLE_DRIVE_FOLDER_RESOURCE.urlPattern]);
+  });
+
   it("deduplicates scopes shared between resources", () => {
     let scopes = resourceUrlPatternsToOAuthScopes(
       [GOOGLE_DOC_RESOURCE.urlPattern, GOOGLE_SHEETS_RESOURCE.urlPattern]);
@@ -253,11 +334,41 @@ describe("resourcesCoveredByScopes", () => {
       "https://www.googleapis.com/auth/drive.metadata",
       "https://www.googleapis.com/auth/documents",
       "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/presentations",
     ])).toEqual(folderIntent);
+    // Sheets needs the read-write `spreadsheets` scope, which only `drive` subsumes.
     expect(resourcesCoveredByScopes(
       [GOOGLE_DOC_RESOURCE.urlPattern, GOOGLE_SHEETS_RESOURCE.urlPattern],
       ["https://www.googleapis.com/auth/drive.readonly"],
-    )).toEqual([GOOGLE_SHEETS_RESOURCE.urlPattern]);
+    )).toEqual([]);
+  });
+});
+
+describe("creatable resources", () => {
+  it("creates exactly Docs, Sheets and Slides", () => {
+    expect(creatableKind(GOOGLE_DOC_RESOURCE.urlPattern)).toBe("doc");
+    expect(creatableKind(GOOGLE_SHEETS_RESOURCE.urlPattern)).toBe("sheets");
+    expect(creatableKind(GOOGLE_SLIDES_RESOURCE.urlPattern)).toBe("slides");
+    expect(SUPPORTED_RESOURCES.filter(resource => resource.creatable))
+      .toEqual([GOOGLE_DOC_RESOURCE, GOOGLE_SHEETS_RESOURCE, GOOGLE_SLIDES_RESOURCE]);
+    for (let pattern of [GMAIL_RESOURCE.urlPattern, GOOGLE_DRIVE_FILE_RESOURCE.urlPattern, "nonsense"]) {
+      expect(() => creatableKind(pattern)).toThrow(
+        "Google can create only these resource types: " +
+        "Google Doc (https://docs.google.com/document/d/:docId/*), " +
+        "Google Spreadsheet (https://docs.google.com/spreadsheets/d/:spreadsheetId/*), " +
+        "Google Slides Presentation (https://docs.google.com/presentation/d/:presentationId/*).");
+    }
+  });
+
+  // A created file's URL becomes its binding's resource URL, so it must parse back to the same
+  // file; a file not yet created gets one that cannot be bound at all.
+  it.each([
+    ["doc", { kind: "doc", documentId: "abc" }],
+    ["sheets", { kind: "sheets", spreadsheetId: "abc" }],
+    ["slides", { kind: "slides", presentationId: "abc" }],
+  ] as const)("round-trips a created %s's URL", (kind, target) => {
+    expect(parseResourceUrl(nativeFileUrl(kind, "abc"))).toEqual(target);
+    expect(() => parseResourceUrl(nativeFileUrl(kind))).toThrow();
   });
 });
 
@@ -303,8 +414,8 @@ describe("parseResourceUrl", () => {
       expect(() => parseResourceUrl(url)).toThrow(/Unsupported Google/);
     });
 
-    it("rejects a docs.google.com path that is neither a doc nor a sheet", () => {
-      expect(() => parseResourceUrl("https://docs.google.com/presentation/d/abc/edit"))
+    it("rejects a docs.google.com path that is not a doc, sheet or presentation", () => {
+      expect(() => parseResourceUrl("https://docs.google.com/forms/d/abc/edit"))
         .toThrow(/Unsupported Google Docs resource URL/);
     });
 
@@ -327,9 +438,9 @@ describe("parseResourceUrl", () => {
 
       it("omits the fragment, which for Gmail is a search query", () => {
         let message = messageFor(
-          "https://docs.google.com/presentation/d/abc/edit#search/acquisition+target");
+          "https://docs.google.com/forms/d/abc/edit#search/acquisition+target");
         expect(message).not.toContain("acquisition");
-        expect(message).toContain("docs.google.com/presentation/d/abc/edit");
+        expect(message).toContain("docs.google.com/forms/d/abc/edit");
       });
 
       it("omits query parameters", () => {
@@ -338,7 +449,7 @@ describe("parseResourceUrl", () => {
       });
 
       it("omits credentials embedded in the authority", () => {
-        let message = messageFor("https://user:hunter2@docs.google.com/presentation/d/abc");
+        let message = messageFor("https://user:hunter2@docs.google.com/forms/d/abc");
         expect(message).not.toContain("hunter2");
         expect(message).not.toContain("user");
       });
@@ -404,7 +515,7 @@ describe("parseResourceUrl", () => {
     });
   });
 
-  describe("docs and sheets", () => {
+  describe("docs, sheets and slides", () => {
     it("extracts a document ID, ignoring trailing path", () => {
       expect(parseResourceUrl("https://docs.google.com/document/d/DOC123/edit?usp=sharing"))
         .toEqual({ kind: "doc", documentId: "DOC123" });
@@ -415,9 +526,15 @@ describe("parseResourceUrl", () => {
         .toEqual({ kind: "sheets", spreadsheetId: "SHEET123" });
     });
 
+    it("extracts a presentation ID", () => {
+      expect(parseResourceUrl("https://docs.google.com/presentation/d/DECK123/edit#slide=id.p"))
+        .toEqual({ kind: "slides", presentationId: "DECK123" });
+    });
+
     it.each([
       ["document", "https://docs.google.com/document/d/"],
       ["spreadsheet", "https://docs.google.com/spreadsheets/d/"],
+      ["presentation", "https://docs.google.com/presentation/d/"],
     ])("rejects a %s URL with no ID", (_name, url) => {
       expect(() => parseResourceUrl(url)).toThrow(/no .* ID found/);
     });
@@ -472,6 +589,69 @@ describe("parseResourceUrl", () => {
     it("rejects paths outside the permanent Drive grammar", () => {
       expect(() => parseResourceUrl("https://drive.google.com/drive/u/0/my-drive"))
         .toThrow(/Unsupported Google Drive resource URL/);
+    });
+  });
+
+  describe("Google Chat", () => {
+    it.each([
+      ["the whole account", "https://chat.google.com/", { kind: "chatAccount" }],
+      ["the whole account with no trailing slash", "https://chat.google.com", { kind: "chatAccount" }],
+      ["one conversation", "https://chat.google.com/room/AAAA1234",
+        { kind: "chatSpace", spaceId: "AAAA1234" }],
+      ["one conversation with a trailing slash", "https://chat.google.com/room/AAAA1234/",
+        { kind: "chatSpace", spaceId: "AAAA1234" }],
+      ["one thread", "https://chat.google.com/room/AAAA1234/TTT",
+        { kind: "chatThread", spaceId: "AAAA1234", threadId: "TTT" }],
+      ["one thread with a trailing slash", "https://chat.google.com/room/AAAA1234/TTT/",
+        { kind: "chatThread", spaceId: "AAAA1234", threadId: "TTT" }],
+      // Chat's own links add a `cls` view parameter, which names no resource.
+      ["one conversation from a link Chat gave out", "https://chat.google.com/room/AAAA1234?cls=7",
+        { kind: "chatSpace", spaceId: "AAAA1234" }],
+      ["one thread from a link Chat gave out", "https://chat.google.com/room/AAAA1234/TTT?cls=10",
+        { kind: "chatThread", spaceId: "AAAA1234", threadId: "TTT" }],
+      ["one thread from a message's link", "https://chat.google.com/room/AAAA1234/TTT/MMM?cls=10",
+        { kind: "chatThread", spaceId: "AAAA1234", threadId: "TTT" }],
+      // Chat links to a direct message under /dm/ rather than /room/.
+      ["one direct message", "https://chat.google.com/dm/AAAA1234?cls=7",
+        { kind: "chatSpace", spaceId: "AAAA1234" }],
+      ["one thread from a direct message's link", "https://chat.google.com/dm/AAAA1234/TTT/MMM?cls=10",
+        { kind: "chatThread", spaceId: "AAAA1234", threadId: "TTT" }],
+    ] as const)("scopes to %s", (_name, url, expected) => {
+      expect(parseResourceUrl(url)).toEqual(expected);
+    });
+
+    // The id is interpolated into every Chat request path, so anything outside Google's alphabet
+    // has to be refused where the capability is minted rather than deeper in.
+    it.each([
+      "https://chat.google.com/room/",
+      "https://chat.google.com/room/AAA%2F..%2FBBB",
+      "https://chat.google.com/room/AAA/BBB/CCC/DDD",
+      "https://chat.google.com/room/AAA/B%2FC",
+      "https://chat.google.com/room/AAA/...",
+      "https://chat.google.com/dm/",
+      "https://chat.google.com/dm/AAA/BBB/CCC/DDD",
+      "https://chat.google.com/u/0/",
+      // Anything but Chat's own view parameter is refused rather than guessed at.
+      "https://chat.google.com/room/AAAA1234?cls=7&tab=1",
+      "https://chat.google.com/?tab=1",
+      "https://chat.google.com/room/AAAA1234#frag",
+    ])("rejects %s", url => {
+      expect(() => parseResourceUrl(url)).toThrow(/Google Chat/);
+    });
+
+    it("matches each Chat URL to exactly one resource pattern", () => {
+      for (const [url, expected] of [
+        ["https://chat.google.com/", GOOGLE_CHAT_RESOURCE],
+        ["https://chat.google.com/room/AAAA1234", GOOGLE_CHAT_SPACE_RESOURCE],
+        ["https://chat.google.com/room/AAAA1234/TTT", GOOGLE_CHAT_THREAD_RESOURCE],
+        ["https://chat.google.com/room/AAAA1234/TTT/MMM", GOOGLE_CHAT_THREAD_RESOURCE],
+        ["https://chat.google.com/dm/AAAA1234", GOOGLE_CHAT_SPACE_RESOURCE],
+        ["https://chat.google.com/dm/AAAA1234/TTT/MMM", GOOGLE_CHAT_THREAD_RESOURCE],
+      ] as const) {
+        for (const resource of SUPPORTED_RESOURCES) {
+          expect(new URLPattern(resource.urlPattern).test(url)).toBe(resource === expected);
+        }
+      }
     });
   });
 
@@ -563,5 +743,99 @@ describe("recorded account grants", () => {
     };
     expect(recordedResourceUrlPatterns(grant)).toEqual([GMAIL_RESOURCE.urlPattern]);
     expect(grantedResourceUrlPatterns(grant)).toEqual([GMAIL_RESOURCE.urlPattern]);
+  });
+
+  it("carries a grant recorded under a pattern a later deploy renamed", () => {
+    const renamed = [GOOGLE_CHAT_SPACE_RESOURCE.urlPattern, GOOGLE_CHAT_THREAD_RESOURCE.urlPattern];
+    const grant = {
+      resourceUrlPatterns: [
+        "https://chat.google.com/room/:spaceId",
+        "https://chat.google.com/room/:spaceId/:threadId",
+      ],
+      oauthScopes: resourceUrlPatternsToOAuthScopes(renamed),
+    };
+    expect(recordedResourceUrlPatterns(grant)).toEqual(renamed);
+    expect(grantedResourceUrlPatterns(grant)).toEqual(renamed);
+  });
+});
+
+describe("Office import grant", () => {
+  const DRIVE_READONLY = "https://www.googleapis.com/auth/drive.readonly";
+  const DRIVE_FILE = "https://www.googleapis.com/auth/drive.file";
+  const DRIVE = "https://www.googleapis.com/auth/drive";
+  const NATIVE = [GOOGLE_DOC_RESOURCE, GOOGLE_SHEETS_RESOURCE, GOOGLE_SLIDES_RESOURCE]
+    .map(resource => resource.urlPattern);
+
+  it("is a private grant, not a resource anything can list, offer or bind", () => {
+    expect(OFFICE_IMPORT_GRANT).toBe("https://docs.google.com/import");
+    expect(isPrivateGrant(OFFICE_IMPORT_GRANT)).toBe(true);
+    expect(SUPPORTED_RESOURCES.map(resource => resource.urlPattern)).not.toContain(OFFICE_IMPORT_GRANT);
+    expect(RESOURCE_SCOPES.map(entry => entry.resource.urlPattern)).not.toContain(OFFICE_IMPORT_GRANT);
+    expect(Object.values(RESOURCE_BY_KIND).map(resource => resource.urlPattern))
+      .not.toContain(OFFICE_IMPORT_GRANT);
+    for (let resource of SUPPORTED_RESOURCES) expect(isPrivateGrant(resource.urlPattern)).toBe(false);
+  });
+
+  it("stays out of the frozen inference lists", () => {
+    expect(SCOPE_DERIVED_RESOURCE_URL_PATTERNS).not.toContain(OFFICE_IMPORT_GRANT);
+    expect(LEGACY_GRANTED_RESOURCE_URL_PATTERNS).not.toContain(OFFICE_IMPORT_GRANT);
+  });
+
+  // connectAccount requests every supported resource when the caller names none.
+  it("is not part of a first connection's request-everything default", () => {
+    let everything = resourceUrlPatternsToOAuthScopes(
+      SUPPORTED_RESOURCES.map(resource => resource.urlPattern));
+    expect(everything).not.toContain(DRIVE_READONLY);
+    expect(everything).not.toContain(DRIVE_FILE);
+  });
+
+  it("can never be bound", () => {
+    expect(() => parseResourceUrl(OFFICE_IMPORT_GRANT)).toThrow("Unsupported Google Docs resource URL");
+  });
+
+  it("validates as a known pattern and asks for drive.readonly and drive.file only", () => {
+    expect(() => validateResourceUrlPatterns([OFFICE_IMPORT_GRANT])).not.toThrow();
+    expect(resourceUrlPatternsToOAuthScopes([OFFICE_IMPORT_GRANT]))
+      .toEqual([...IDENTITY_SCOPES, DRIVE_READONLY, DRIVE_FILE]);
+  });
+
+  it("is covered by its own scopes or by full drive, and by nothing narrower", () => {
+    expect(resourcesCoveredByScopes([OFFICE_IMPORT_GRANT], [DRIVE_READONLY, DRIVE_FILE]))
+      .toEqual([OFFICE_IMPORT_GRANT]);
+    expect(resourcesCoveredByScopes([OFFICE_IMPORT_GRANT], [DRIVE])).toEqual([OFFICE_IMPORT_GRANT]);
+    expect(resourcesCoveredByScopes([OFFICE_IMPORT_GRANT], [DRIVE_READONLY])).toEqual([]);
+    expect(resourcesCoveredByScopes([OFFICE_IMPORT_GRANT], [DRIVE_FILE])).toEqual([]);
+    expect(resourcesCoveredByScopes([OFFICE_IMPORT_GRANT],
+      resourceUrlPatternsToOAuthScopes(NATIVE))).toEqual([]);
+  });
+
+  it("implies no Drive resource and no other resource, alone or beside Docs, Sheets and Slides", () => {
+    for (let resourceUrlPatterns of [[OFFICE_IMPORT_GRANT], [...NATIVE, OFFICE_IMPORT_GRANT]]) {
+      let grant = {
+        resourceUrlPatterns,
+        oauthScopes: resourceUrlPatternsToOAuthScopes(resourceUrlPatterns),
+      };
+      let granted = grantedResourceUrlPatterns(grant);
+      expect(granted.toSorted()).toEqual(resourceUrlPatterns.toSorted());
+      expect(hasDriveResourceGrant(granted)).toBe(false);
+    }
+    // An account recorded before it named its resources infers only what predates recording.
+    let scopeOnly = { oauthScopes: resourceUrlPatternsToOAuthScopes([OFFICE_IMPORT_GRANT]) };
+    expect(grantedResourceUrlPatterns(scopeOnly)).toEqual([]);
+    expect(recordedResourceUrlPatterns(scopeOnly)).toEqual([]);
+  });
+
+  it("is reported held, and re-requested on reconnect, once recorded", () => {
+    let grant = {
+      resourceUrlPatterns: [GOOGLE_SHEETS_RESOURCE.urlPattern, OFFICE_IMPORT_GRANT],
+      oauthScopes: resourceUrlPatternsToOAuthScopes(
+        [GOOGLE_SHEETS_RESOURCE.urlPattern, OFFICE_IMPORT_GRANT]),
+    };
+    expect(grantedResourceUrlPatterns(grant)).toContain(OFFICE_IMPORT_GRANT);
+    expect(recordedResourceUrlPatterns(grant)).toContain(OFFICE_IMPORT_GRANT);
+    // A declined scope retracts it, but the reconnect still asks again.
+    let declined = { ...grant, oauthScopes: resourceUrlPatternsToOAuthScopes([GOOGLE_SHEETS_RESOURCE.urlPattern]) };
+    expect(grantedResourceUrlPatterns(declined)).toEqual([GOOGLE_SHEETS_RESOURCE.urlPattern]);
+    expect(recordedResourceUrlPatterns(declined)).toContain(OFFICE_IMPORT_GRANT);
   });
 });

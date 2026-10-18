@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import type { Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
+import { cloudflareTest } from '@cloudflare/vitest-plugin'
+import { COMPATIBILITY_DATE } from '@gadgets/scripts/worker-config'
 import capnwebValidate from 'capnweb-validate/vite'
 
 // Wrangler ships `*.txt` imports as Text modules (its default module rules; see
@@ -27,8 +28,39 @@ const textModules: Plugin = {
   },
 }
 
+// Records the agent and step-persistence spans this Worker emits, as a streaming tail
+// worker receives them, so tests can read them back through the SPAN_RECORDER binding.
+const spanRecorder = `
+import { WorkerEntrypoint } from "cloudflare:workers";
+const AGENT_SPAN = /^(invoke_agent|chat|execute_tool|tool_approval)( |$)/;
+const spans = new Map();
+export class SpanRecorder extends WorkerEntrypoint {
+  spans() { return [...spans.values()]; }
+}
+export default {
+  tailStream() {
+    return ({ event, spanContext }) => {
+      if (event.type === "spanOpen" &&
+          (AGENT_SPAN.test(event.name) || event.name === "agent.step.persist")) {
+        spans.set(event.spanId, {
+          name: event.name, spanId: event.spanId, parentSpanId: spanContext.spanId,
+          attributes: {}, closed: false,
+        });
+      }
+      let span = spans.get(spanContext.spanId);
+      if (span === undefined) return;
+      if (event.type === "attributes") {
+        for (let { name, value } of event.info) span.attributes[name] = value;
+      } else if (event.type === "spanClose") {
+        span.closed = true;
+      }
+    };
+  },
+};
+`
+
 /**
- * Tests run inside workerd (via vitest-pool-workers) so they exercise the same runtime APIs as
+ * Tests run inside workerd (via `@cloudflare/vitest-plugin`) so they exercise the same runtime APIs as
  * production -- e.g. Uint8Array.toHex/fromHex and crypto.subtle used by the sharing module. Most
  * tests import modules directly; the main Worker and a test-only SQLite DO binding support the
  * Overseer cost-persistence integration test without loading the full deployment configuration.
@@ -41,12 +73,23 @@ export default defineConfig({
       // The production Worker plus test-only entrypoints (see __tests__/test-worker.ts).
       main: './__tests__/test-worker.ts',
       miniflare: {
-        compatibilityDate: '2026-09-04',
-        // `allow_irrevocable_stub_storage` as in wrangler.jsonc: the user DO persists account stubs.
+        compatibilityDate: COMPATIBILITY_DATE,
+        // `allow_irrevocable_stub_storage` as in cloudflare.config.ts: the user DO persists account stubs.
         compatibilityFlags: ['experimental', 'nodejs_compat', 'allow_irrevocable_stub_storage'],
+        streamingTails: ['span-recorder'],
+        serviceBindings: { SPAN_RECORDER: { name: 'span-recorder', entrypoint: 'SpanRecorder' } },
+        workers: [{
+          name: 'span-recorder',
+          modules: true,
+          script: spanRecorder,
+          compatibilityDate: COMPATIBILITY_DATE,
+          compatibilityFlags: ['experimental', 'streaming_tail_worker'],
+        }],
         bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
         // The overseer loads gadget code through this, so a test can run a real gadget facet.
         workerLoaders: { LOADER: {} },
+        // Where a blueprint's content is published to and read back from.
+        r2Buckets: ['BLUEPRINT_CONTENT'],
         durableObjects: {
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
           TEST_USER: { className: 'UserDurableObject', useSQLite: true },
@@ -55,12 +98,20 @@ export default defineConfig({
           // which the overseer instantiates it (with props) as one of its own facets.
           TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
           TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
+          // Likewise only reached through `ctx.exports`, by the overseer deleting a blueprint.
+          TEST_ADMIN_SETTINGS: { className: 'AdminSettings', useSQLite: true },
+          TEST_GATEKEEPER_USER_PICKER: { className: 'GatekeeperUserPickerTestHooks', useSQLite: true },
         },
       },
     }),
   ],
   test: {
     include: ['__tests__/*.test.ts'],
+    // Vitest 5 enables this by default, and every run after the first breaks under the Workers
+    // pool: cached `.txt` modules come back with root-relative ids that `textModules` cannot
+    // read, and the pool's WebSocket rejects the larger cached modules (1009, "Message is too
+    // large"). Vite+ already caches the whole test task.
+    fsModuleCache: false,
     // Asserts the pool actually started, rather than trusting a green run to mean workerd.
     setupFiles: ['@gadgets/scripts/assert-workerd'],
   },
