@@ -36,6 +36,8 @@ export default {
         command: withTestTimeout(
           'capnweb-validate build --cwd ../gatekeeper-email --out .wrangler/validate',
         ),
+        // The configurator UI (src/generated/*.txt) that gatekeeper-email imports.
+        dependsOn: ['@gadgets/email-gatekeeper#build:configurator'],
         cache: false,
       },
       /**

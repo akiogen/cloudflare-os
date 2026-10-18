@@ -1,18 +1,15 @@
+// Generated from cloudflare.config.ts by scripts/generate-worker-configs.ts -- do not edit.
+// Change cloudflare.config.ts and run `pnpm configs:generate`.
 {
-  "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "blos-team-policy",
-
-  // Test double for a deployment's TEAM_POLICY binding: no RPC validation build. The Workshop
-  // reaches it through the harness's `services` option.
   "main": "src/blos-team-policy.ts",
-
   "compatibility_date": "2026-09-04",
-
-  // Per-user Team overrides, so a test can move a user to another Team.
-  "durable_objects": {
-    "bindings": [{ "name": "OVERRIDES", "class_name": "TeamOverrides" }]
-  },
   "migrations": [
-    { "tag": "v0", "new_sqlite_classes": ["TeamOverrides"] }
+    {
+      "tag": "v0",
+      "new_sqlite_classes": [
+        "TeamOverrides"
+      ]
+    }
   ]
 }

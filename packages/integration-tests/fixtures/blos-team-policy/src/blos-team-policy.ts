@@ -17,7 +17,9 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { ResourceAuthorization, TeamPolicy } from "@gadgets/workshop-shared/team-policy";
 
-type Env = { OVERRIDES: DurableObjectNamespace<TeamOverrides> };
+// The Worker's own TeamOverrides class, reached through ctx.exports (no durable_objects binding).
+type Exports = { TeamOverrides: DurableObjectNamespace<TeamOverrides> };
+type Env = Record<string, never>;
 
 // Module exports of a Worker must be handlers, so these stay module-private.
 const TEAM_A = "team-a";
@@ -73,7 +75,7 @@ export class TeamOverrides extends DurableObject<Env> {
 
 export default class BlosTeamPolicy extends WorkerEntrypoint<Env> implements TeamPolicy {
   #overrides(): DurableObjectStub<TeamOverrides> {
-    return this.env.OVERRIDES.getByName("");
+    return (this.ctx.exports as unknown as Exports).TeamOverrides.getByName("");
   }
 
   async teamOf(userId: string): Promise<string> {
