@@ -62,8 +62,16 @@ const WORKER_INPUTS: WorkerInput[] = [
   { kind: "dir", path: "packages/workshop-backend", excludeDirs: [...BUILT, "src", ".wrangler"] },
   { kind: "dir", path: "packages/workshop-backend/src", excludeDirs: ["generated"] },
   { kind: "dir", path: "packages/workshop-shared", excludeDirs: BUILT },
-  { kind: "dir", path: "packages/backend-utils", excludeDirs: BUILT },
+  { kind: "dir", path: "packages/observability", excludeDirs: BUILT },
   { kind: "dir", path: "packages/error-reporting", excludeDirs: BUILT },
+  // Bundled into the fixture gatekeeper.
+  { kind: "dir", path: "packages/gatekeeper-kit", excludeDirs: BUILT },
+  // The real Context gatekeeper, split to keep its generated SPA and validated tree out of watch.
+  {
+    kind: "dir", path: "packages/gatekeeper-context",
+    excludeDirs: [...BUILT, "src", "dist-app", ".wrangler"],
+  },
+  { kind: "dir", path: "packages/gatekeeper-context/src", excludeDirs: ["generated"] },
   // `typed-storage` is the one package that emits: wrangler loads its `dist/index.js`, so `dist` is
   // output here like anywhere else, and it is the package's config -- not just its source -- that
   // decides what gets emitted.
@@ -104,19 +112,23 @@ export const FORCE_RERUN_TRIGGERS: string[] = WORKER_INPUTS.flatMap(entry => {
 });
 
 /**
- * Whether an absolute path is one of the inputs above.
+ * Whether a workspace-relative, `/`-separated path is one of the inputs above. This form also
+ * serves the eval cache key (`scripts/evals/eval-keys.ts`), which matches the paths of a git tree.
  *
  * Plain string operations rather than the `picomatch` the globs are matched with: it is a
  * transitive dependency here, not resolvable from this package, and the shapes the table can
  * produce are a prefix and a first-segment check.
  */
-export function isWorkerInput(absolutePath: string): boolean {
-  const path = resolve(absolutePath).replaceAll("\\", "/");
+export function isWorkerInputPath(path: string): boolean {
   return WORKER_INPUTS.some(entry => {
-    const root = absolute(entry.path);
-    if (entry.kind === "file") return path === root;
-    if (!path.startsWith(`${root}/`)) return false;
-    const [firstSegment] = path.slice(root.length + 1).split("/");
+    if (entry.kind === "file") return path === entry.path;
+    if (!path.startsWith(`${entry.path}/`)) return false;
+    const [firstSegment] = path.slice(entry.path.length + 1).split("/");
     return !entry.excludeDirs?.includes(firstSegment);
   });
+}
+
+/** Whether an absolute path is one of the inputs above. */
+export function isWorkerInput(absolutePath: string): boolean {
+  return isWorkerInputPath(relative(WORKSPACE_DIR, resolve(absolutePath)).replaceAll("\\", "/"));
 }

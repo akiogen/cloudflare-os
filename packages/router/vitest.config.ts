@@ -1,8 +1,9 @@
 import { defineConfig } from 'vitest/config'
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
+import { cloudflareTest } from '@cloudflare/vitest-plugin'
+import { COMPATIBILITY_DATE } from '@gadgets/scripts/worker-config'
 
 /**
- * Tests run inside workerd (via vitest-pool-workers) so they exercise the same runtime APIs as
+ * Tests run inside workerd (via `@cloudflare/vitest-plugin`) so they exercise the same runtime APIs as
  * production. A minimal inline Miniflare config suffices: the tests call the exported handler
  * directly with stub env objects, so no real service bindings are needed.
  */
@@ -10,7 +11,7 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       miniflare: {
-        compatibilityDate: '2026-09-04',
+        compatibilityDate: COMPATIBILITY_DATE,
         compatibilityFlags: ['nodejs_compat'],
       },
     }),

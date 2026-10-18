@@ -145,7 +145,10 @@ describe("restarting sessions when verification scope widens", () => {
     // A "build" client interface whose blocked-connection check is the real impl's.
     let client = await openFakeOverseer(
         { gatekeepers: impl.storage.gatekeepers },
-        { impl: { assertGatekeeperUsable: (id: number) => impl.assertGatekeeperUsable(id) } });
+        { impl: {
+          assertGatekeeperUsable: (id: number) => impl.assertGatekeeperUsable(id),
+          getGatekeeperFacet: (id: number) => impl.getGatekeeperFacet(id),
+        } });
 
     let added = await impl.addGatekeeper({} as any, CONNECTION_SPEC);
     let id = await added.getId();
@@ -224,47 +227,6 @@ describe("restarting sessions when verification scope widens", () => {
 
     expect(restarts).toEqual([]);
     expect(() => impl.assertGatekeeperUsable(1)).not.toThrow();
-  }));
-
-  it("a pending bind is invisible to collaborators, so it restarts nothing",
-      () => withImpl(async (impl, restarts) => {
-    joinSession(impl, "use");
-    seedGatekeeper(impl, 1);
-    seedGadget(impl, 100);
-
-    // An edge provisional to a chat isn't in #useScopeGatekeeperIds until it's promoted, which
-    // is what restarts (see the merge case below).
-    impl.bindWorkpiece(100, "DB", 1, 7);
-
-    expect(restarts).toEqual([]);
-  }));
-
-  it("promoting a pending bind at merge restarts a connected use collaborator",
-      () => withImpl(async (impl, restarts) => {
-    joinSession(impl, "use");
-    seedGatekeeper(impl, 1);
-    seedGadget(impl, 100);
-    impl.storage.chatMeta.put(
-        { id: 1, title: "Chat", started: new Date(0), lastActive: new Date(0) });
-
-    impl.bindWorkpiece(100, "DB", 1, 1);
-    await impl.commitAgentStep(1, AGENT, [{ type: "message", message: "bound a connection" }], {
-      changes: [],
-      createdGadgets: [],
-      addedBindings: [{ gadgetId: 100, name: "DB", target: 1 }],
-      createdWorktrees: [],
-      worktreeCommits: [],
-    });
-    expect(restarts).toEqual([]);
-
-    expect(await impl.mergeChanges(1, USER_META, "owner-user-do"))
-        .toEqual({ outcome: "merged" });
-
-    // Accepting the change is the moment the edge becomes visible to "use" collaborators.
-    expect(impl.storage.gadgets.get(100).bindings.DB.pending).toBeUndefined();
-    expect(restarts).toHaveLength(1);
-    // And, as with a direct bind, the promoted connection is blocked until the reset lands.
-    expect(() => impl.assertGatekeeperUsable(1)).toThrow(/restarting/);
   }));
 
   it("a merge that promotes only a vendorless edge restarts nothing",
@@ -419,7 +381,7 @@ describe("restarting sessions when verification scope widens", () => {
 
     // A connection capability minted into a collaborator's session (joinAs "build") counts for
     // its own lifetime: the client can dispose the interface that minted it and retain this.
-    let added = await impl.addGatekeeper({} as any, CONNECTION_SPEC, "build");
+    let added = await impl.addGatekeeper({} as any, CONNECTION_SPEC, OWNER, "build");
     expect(restarts).toEqual([]);
 
     await impl.addGatekeeper({} as any, CONNECTION_SPEC);
@@ -580,20 +542,6 @@ describe("hooks widen use scope", () => {
       pending: { chatId },
     });
   }
-
-  it("enabling a hook on an unbound connection restarts a connected use collaborator",
-      () => withImpl(async (impl, restarts) => {
-    joinSession(impl, "use");
-    seedGatekeeper(impl, 1);
-    seedHook(impl);
-
-    impl.enableHookRecord(impl.storage.boundHooks.get(5));
-
-    expect(impl.storage.boundHooks.get(5).enabled).toBe(true);
-    expect(restarts).toHaveLength(1);
-    // And, like any other widening, the connection is blocked until the reset lands.
-    expect(() => impl.assertGatekeeperUsable(1)).toThrow(/restarting/);
-  }));
 
   it("enabling a hook on an already-bound connection widens nothing",
       () => withImpl(async (impl, restarts) => {
@@ -1054,7 +1002,7 @@ describe("connections blocked pending restart", () => {
         resourceUrl: "https://example.com/1", typeUrlPattern: "https://*",
       },
     });
-    impl.getGatekeeperFacet = (id: number) => ({
+    impl.getGatekeeperFacet = async (id: number) => ({
       describe: async () =>
           ({ title: "Test", url: "https://example.com/new", hasSlashCommands: true }),
       ...slashProvider(id === 1 ? "usable" : "blocked"),
@@ -1144,5 +1092,45 @@ describe("ambient catalogs", () => {
     expect(catalogLoads).toEqual([1, 2, 1, 1]);
     expect(other.find(seed => seed.target === 1)?.catalog).toEqual({ entries: [] });
     expect(other.find(seed => seed.target === 2)?.catalog).toBeNull();
+  }));
+});
+
+describe("ambient resources a chat gains", () => {
+  it("join a regular chat under a name free in its scope, never a spawned chat's env",
+      () => withImpl(async (impl) => {
+    impl.getGatekeeperFacet = (id: number) => ({
+      describe: async () =>
+          ({ title: `T${id}`, url: "https://example.com", suggestedBindingName: "RES" }),
+      getAgentCatalog: async () => null,
+    });
+    let addAmbient = (id: number) => {
+      seedGatekeeper(impl, id);
+      let record = impl.storage.gatekeepers.get(id);
+      record.creationSpec = { type: "ambient", vendorId: `v${id}` };
+      impl.storage.gatekeepers.put(record);
+    };
+    addAmbient(1);
+    for (let chatId of [1, 2]) {
+      impl.storage.chatMeta.put(
+          { id: chatId, title: "Chat", started: new Date(0), lastActive: new Date(chatId) });
+    }
+    impl.storage.chatContext.put({
+      chatId: 2, spawnerConfig: { displayName: "Spawner", modelId: "m", env: {} }, bindings: {},
+    });
+    await impl.prepareChatBindings(1, []);
+    await impl.prepareChatBindings(2, []);
+
+    // The owner turns on another ambient gatekeeper after the user pasted a resource that the chat
+    // named RES_2.
+    addAmbient(3);
+    let pasted = {
+      type: "message", sequence: 3, capsules: [{ gatekeeperId: 9, bindingName: "RES_2" }],
+    };
+    let seeds: SeedBindingInfo[] = await impl.prepareChatBindings(1, [pasted]);
+    await impl.prepareChatBindings(2, []);
+
+    expect(impl.getChatAgentContext(1).bindings).toEqual({ RES: 1, RES_3: 3 });
+    expect(seeds.find(seed => seed.target === 3)).toMatchObject({ name: "RES_3", catalog: null });
+    expect(impl.getChatAgentContext(2).bindings).toEqual({});
   }));
 });

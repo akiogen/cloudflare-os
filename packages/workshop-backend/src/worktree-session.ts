@@ -9,18 +9,25 @@
 // side -- base-tree walks, blob reads, commit writes -- goes through the host's WorkspaceGitCache
 // and GitStore, the same plumbing the file tools' lazy reads use.
 //
+// The env.GIT binding (git-binding.ts) serves this same class for its in-memory worktrees,
+// substituting a single object holding the worktree's state for both the turn and the host.
+//
 // Content rules match the file tools': regular files of either mode are operable (an edited
 // executable keeps its bit), symlink/gitlink/directory paths throw their descriptive errors,
 // and unreadable *content* (oversized/binary) is distinguished from path-shape errors by
 // UnreadableContentError -- writeFile falls back to a whole-file `set` on it, while grep
 // reports it as a structured error entry (a "(skipped: ...)" note in the freeform format) and
-// diff renders it as a skip note.
+// diff likewise (a "(cannot diff ...)" note).
 
 import { RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import type { StructuredGrepResult, Worktree, WorktreeFileEntry } from "./worktree-binding";
+import { structuredPatch } from "diff";
+import type {
+  DiffFile, DiffFileKind, DiffHunk, DiffLine, StructuredDiffResult, StructuredGrepResult, Worktree,
+  WorktreeFileEntry,
+} from "./worktree-binding";
 import type { AiChatAuthorInfo, WorkpieceId } from "@gadgets/workshop-shared/api";
-import { diffFiles, type FileChange } from "@gadgets/workshop-shared/code-change";
+import { diffFiles, validateCodeChangeSchema, type FileChange, type FileContent } from "@gadgets/workshop-shared/code-change";
 
 import { UnreadableContentError, type WorkspaceGitCache } from "./git-cache";
 import { commitIdentityForAuthor, type GitStore } from "./git-store";
@@ -49,8 +56,12 @@ export interface WorktreeRecordView {
  */
 @validateRpc()
 export class WorktreeSessionImpl extends RpcTarget implements Worktree {
+  /**
+   * `author` resolves who commits are attributed to. It is called only by commit(), so a session
+   * that never commits never pays for resolving it (env.GIT's may need an RPC to the owner's DO).
+   */
   constructor(private host: WorktreeSessionHost, private worktreeId: WorkpieceId,
-              private turn: WorktreeTurnAccess, private initiator: AiChatAuthorInfo) {
+              private turn: WorktreeTurnAccess, private author: () => Promise<AiChatAuthorInfo>) {
     super();
   }
 
@@ -150,12 +161,48 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     return text;
   }
 
+  async #byteValue(path: string): Promise<FileContent> {
+    const overlay = this.turn.getOverlayFiles(this.worktreeId);
+    const value = overlay.get(path);
+    if (value !== undefined) return value;
+    if (this.turn.getRemovedPaths(this.worktreeId).has(path)) throw new Error(`${path}: no such file`);
+    const base = await this.host.gitCache.fileBytesAtCommit(this.#pinBase(), path);
+    // The session may have closed while the base faulted in; do not serve it after revocation.
+    this.#pinBase();
+    if (!base) throw new Error(`${path}: no such file`);
+    const current = this.turn.getOverlayFiles(this.worktreeId).get(path);
+    if (this.turn.getRemovedPaths(this.worktreeId).has(path)) throw new Error(`${path}: no such file`);
+    return current ?? base;
+  }
+  async readBytes(path: string, range?: {offset: number; length: number}): Promise<ReadableStream<Uint8Array>> {
+    this.#pinBase();
+    const value = await this.#byteValue(path);
+    const bytes = typeof value === "string" ? new TextEncoder().encode(value)
+      : this.host.gitStore.readBlob(value.oid, value.byteLength);
+    const offset = range?.offset ?? 0, length = range?.length ?? bytes.length;
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 ||
+        offset > bytes.length || length > bytes.length - offset) throw new Error("Invalid byte range.");
+    return new ReadableStream({pull: c => {
+      this.#pinBase();
+      c.enqueue(bytes.slice(offset, offset + length)); c.close();
+    }}, {highWaterMark: 0});
+  }
+  async writeBytes(path: string, content: Uint8Array): Promise<void> {
+    await this.host.gitCache.assertWorktreePathWritable(this.#pinBase(), path);
+    this.#pinBase();
+    const value = await this.host.gitStore.writeBlob(content);
+    const change = {setBytes: value};
+    validateCodeChangeSchema({[this.worktreeId]: [[path, change]]});
+    this.#pinBase();
+    this.turn.appendChange(this.worktreeId, path, change);
+  }
   async writeFile(path: string, text: string): Promise<void> {
     let base = this.#pinBase();
     let overlay = this.turn.getOverlayFiles(this.worktreeId);
     let before: string | undefined;
     if (overlay.has(path)) {
-      before = overlay.get(path);
+      const value = overlay.get(path);
+      before = typeof value === "string" ? value : undefined;
     } else if (!this.turn.getRemovedPaths(this.worktreeId).has(path)) {
       // The base entry is still live: reject symlink/gitlink/directory targets with the
       // descriptive read errors (the same rule as the writeFile tool), then read the base text
@@ -217,6 +264,9 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
 
 
   async commit(message: string): Promise<string> {
+    // Resolved first: it may be an RPC, and the worktree state read below shouldn't go stale
+    // across it.
+    let author = commitIdentityForAuthor(await this.author());
     let base = this.#pinBase();
     let previousHead = this.#head();
 
@@ -226,7 +276,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     // auto-commits since, they simply never appear in this commit's ancestry (squash semantics;
     // see WorktreeRecord). The overlay may include lazily-read untouched files; content
     // addressing makes rewriting them a no-op that reuses their blob oids and modes.
-    let changes = new Map<string, string | null>();
+    let changes = new Map<string, FileContent | null>();
     for (let [path, text] of this.turn.getOverlayFiles(this.worktreeId)) {
       changes.set(path, text);
     }
@@ -236,9 +286,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     let commit = await this.host.gitStore.writeChangedFilesAsCommit(changes, {
       treeBase: base,
       parents: [previousHead],
-      // The turn's initiator: in a collaborative chat, a collaborator's work is attributed to
-      // the collaborator, matching how accepted commits use the acting user's profile.
-      author: commitIdentityForAuthor(this.initiator),
+      author,
       message,
       timestamp: new Date(),
     });
@@ -253,9 +301,52 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
   }
 
   async diff(commitId?: string): Promise<string> {
+    let parts: string[] = [];
+    for (let file of await this.#changedFiles(commitId)) {
+      if (file.note !== undefined) {
+        parts.push(`(cannot diff ${file.path}: ${file.note})`);
+        continue;
+      }
+      // An executable's mode is spelled as git spells it, ahead of the content diff (if any): a
+      // mode change, or an added/removed executable. (Git also spells out the default 100644 of
+      // an added/removed regular file; that is left implied here, to keep the common case terse.)
+      let modeLines = gitModeLines(file);
+      if (modeLines.length > 0) {
+        parts.push([`diff --git a/${file.path} b/${file.path}`, ...modeLines].join("\n"));
+        if (file.oldText === file.newText) continue;  // only the mode changed
+      }
+      let diff = formatUnifiedDiff(file.path, file.oldText ?? "", file.newText ?? "",
+                                   file.oldText !== undefined, file.newText !== undefined);
+      if (diff !== undefined) parts.push(diff);
+    }
+    return parts.join("\n");
+  }
+
+  async structuredDiff(commitId?: string): Promise<StructuredDiffResult> {
+    let result: StructuredDiffResult = { files: [], errors: [] };
+    for (let file of await this.#changedFiles(commitId)) {
+      if (file.note !== undefined) {
+        result.errors.push({ file: file.path, error: file.note });
+        continue;
+      }
+      let status: DiffFile["status"] = file.oldText === undefined ? "added"
+          : file.newText === undefined ? "removed" : "modified";
+      let entry: DiffFile = { path: file.path, status,
+                              hunks: structuredHunks(file.oldText ?? "", file.newText ?? "") };
+      if (file.oldKind !== undefined) entry.oldKind = file.oldKind;
+      if (file.newKind !== undefined) entry.newKind = file.newKind;
+      result.files.push(entry);
+    }
+    return result;
+  }
+
+  // The paths that differ between the worktree and `commitId` (default HEAD), in path order:
+  // each with its text on both sides (undefined where absent), or a note explaining why it
+  // cannot be diffed as text.
+  async #changedFiles(commitId?: string): Promise<ChangedFile[]> {
     let base = this.#pinBase();
     let target = commitId !== undefined
-        ? this.host.gitCache.resolveCommitRef(commitId) : this.#head();
+        ? this.host.gitCache.resolveCommitId(commitId) : this.#head();
     let overlay = this.turn.getOverlayFiles(this.worktreeId);
     let removed = this.turn.getRemovedPaths(this.worktreeId);
 
@@ -271,8 +362,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     // first and the text read catches exactly UnreadableContentError, so an operational
     // failure (a pull outage, a corrupt object) still fails the diff rather than silently
     // rendering an incomplete one.
-    let readSide = async (commit: string, path: string)
-        : Promise<{ text?: string, note?: string }> => {
+    let readSide = async (commit: string, path: string): Promise<DiffSide> => {
       let entry = await this.host.gitCache.pathEntryAtCommit(commit, path);
       if (entry === undefined || entry.kind === "dir") return {};
       if (entry.kind === "submodule") {
@@ -281,33 +371,95 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
       try {
         let text = await this.host.gitCache.readTextBlob(entry.oid, entry.referencedBy, path);
         // A symlink's blob is its target, so the note names it (the shape readFile throws).
-        return entry.kind === "symlink" ? { note: `${path} is a symlink to ${text}` } : { text };
+        return entry.kind === "symlink" ? { note: `${path} is a symlink to ${text}` }
+            : { text, kind: entry.kind };
       } catch (err) {
         if (err instanceof UnreadableContentError) return { note: err.message };
         throw err;
       }
     };
 
-    let parts: string[] = [];
+    let files: ChangedFile[] = [];
     for (let path of [...paths].toSorted()) {
       let oldSide = await readSide(target, path);
-      let newSide: { text?: string, note?: string };
+      let newSide: DiffSide;
       if (overlay.has(path)) {
-        newSide = { text: overlay.get(path) };
+        // An overlay file keeps its base entry's mode (the one a commit would write, see
+        // GitStore.writeChangedFilesAsCommit); a new one is a regular file.
+        let baseEntry = await this.host.gitCache.pathEntryAtCommit(base, path);
+        const value = overlay.get(path);
+        newSide = typeof value === "string" ? { text: value,
+          kind: baseEntry?.kind === "executable" ? "executable" : "file" } : {note: "binary content changed"};
       } else if (removed.has(path)) {
         newSide = {};  // removed: no current text
       } else {
         newSide = await readSide(base, path);
       }
       if (oldSide.note !== undefined || newSide.note !== undefined) {
-        parts.push(`(cannot diff ${path}: ${oldSide.note ?? newSide.note})`);
-        continue;
+        files.push({ path, note: oldSide.note ?? newSide.note });
+      } else if (oldSide.text !== newSide.text || oldSide.kind !== newSide.kind) {
+        files.push({ path, oldText: oldSide.text, newText: newSide.text,
+                     oldKind: oldSide.kind, newKind: newSide.kind });
       }
-      if (oldSide.text === newSide.text) continue;
-      let diff = formatUnifiedDiff(path, oldSide.text ?? "", newSide.text ?? "",
-                                   oldSide.text !== undefined, newSide.text !== undefined);
-      if (diff !== undefined) parts.push(diff);
     }
-    return parts.join("\n");
+    return files;
   }
+}
+
+/** One side of a path being diffed: its text and kind (absent where it doesn't exist), or a note. */
+type DiffSide = { text?: string, kind?: DiffFileKind, note?: string };
+
+/** One path found to differ by WorktreeSessionImpl's diff operations. */
+type ChangedFile = {
+  path: string,
+  oldText?: string,
+  newText?: string,
+  oldKind?: DiffFileKind,
+  newKind?: DiffFileKind,
+  note?: string,
+};
+
+/** The git tree modes of the diffable kinds, as a diff's mode lines spell them. */
+const GIT_FILE_MODES: Record<DiffFileKind, string> = { file: "100644", executable: "100755" };
+
+/**
+ * The git-style mode lines diff() renders for a file: for a mode change, or for an added or
+ * removed executable. None otherwise.
+ */
+function gitModeLines({ oldKind, newKind }: ChangedFile): string[] {
+  if (oldKind !== undefined && newKind !== undefined) {
+    return oldKind === newKind ? []
+        : [`old mode ${GIT_FILE_MODES[oldKind]}`, `new mode ${GIT_FILE_MODES[newKind]}`];
+  }
+  if (newKind === "executable") return [`new file mode ${GIT_FILE_MODES[newKind]}`];
+  if (oldKind === "executable") return [`deleted file mode ${GIT_FILE_MODES[oldKind]}`];
+  return [];
+}
+
+/**
+ * One file's before/after as structured hunks: the same jsdiff hunks (and options)
+ * formatUnifiedDiff renders, numbered line by line, with headers spelled exactly as the rendered
+ * diff spells them -- including git's convention that a zero-count side names the line it
+ * attaches after, where jsdiff's structured starts point one past it.
+ */
+function structuredHunks(oldText: string, newText: string): DiffHunk[] {
+  let patch = structuredPatch("", "", oldText, newText, undefined, undefined, { context: 3 });
+  return patch.hunks.map(hunk => {
+    let oldStart = hunk.oldLines === 0 ? hunk.oldStart - 1 : hunk.oldStart;
+    let newStart = hunk.newLines === 0 ? hunk.newStart - 1 : hunk.newStart;
+    let oldLine = oldStart;
+    let newLine = newStart;
+    let lines = hunk.lines.map((raw): DiffLine => {
+      let text = raw.slice(1);
+      switch (raw[0]) {
+        case "+": return { kind: "added", text, newLineNumber: newLine++ };
+        case "-": return { kind: "removed", text, oldLineNumber: oldLine++ };
+        // The `\ No newline at end of file` marker: kept whole, and numbered on neither side.
+        case "\\": return { kind: "context", text: raw };
+        default:
+          return { kind: "context", text, oldLineNumber: oldLine++, newLineNumber: newLine++ };
+      }
+    });
+    return { header: `@@ -${oldStart},${hunk.oldLines} +${newStart},${hunk.newLines} @@`, lines };
+  });
 }

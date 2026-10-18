@@ -1,4 +1,4 @@
-import { logRpcFailure } from "./rpcErrors";
+import { logRpcFailure, rpcFailureDescription } from "./rpcErrors";
 import {
   Fragment,
   isValidElement,
@@ -80,11 +80,13 @@ import {
   ChatAttachmentRef,
   ChatCodeBase,
   WorkpieceId,
+  BlueprintMerge,
   BlueprintOutput,
   MessageFormatRef,
 } from "@gadgets/workshop-shared/api";
-import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import type { ChatChangeRow } from "./features/code/otClient";
+import { composeEpochChanges, type CodeChange } from "@gadgets/workshop-shared/code-change";
+import type { ChatChangeRow, ChatContentReader } from "./features/code/otClient";
+import { commitFileStore, type CommitFileReader } from "./features/code/commitFileStore";
 import { ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   useSlashCommandChoice, type OverseerSource,
@@ -93,12 +95,13 @@ import GatekeeperModal from "./GatekeeperModal";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
 import { formatOf, FORMAT_ICONS } from "./components/format/formats";
 import { FormatMiniature } from "./components/format/FormatVisuals";
-import { HookToggle } from "./components/HookToggle";
+import { HookToggle, hookToggleFailureToast } from "./components/HookToggle";
 import { IncompleteDescriptionNotice, isDescriptionIncomplete } from "./components/IncompleteDescriptionNotice";
 import { ActionFields, entryFields } from "./components/ActionFields";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
 import AutoApproveConfirmDialog from "./components/AutoApproveConfirmDialog";
 import { AlwaysApproveButton, ResolveButton } from "./components/ResolveButton";
+import { RestrictedApprovalNotice } from "./components/RestrictedApprovalNotice";
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/WorkshopControls";
 import { actionLogResumed, useActionEntries } from "./useActions";
 import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
@@ -113,6 +116,12 @@ import { isImeComposing } from "./keyboardEvent";
 import { formatAttachmentSize } from "./features/chat/attachmentFormatting";
 import { ChatComposer } from "./features/chat/composer/ChatComposer";
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
+import {
+  findUnresolvedConflicts, listConflictedFiles, type UnresolvedConflict,
+} from "./features/chat/mergeConflicts";
+import { UnresolvedConflictsDialog } from "./features/chat/UnresolvedConflictsDialog";
+import { BlueprintProposalNotice } from "./features/blueprint-updates/BlueprintProposalNotice";
+import { appliedBlueprintMerges } from "./features/blueprint-updates/blueprintProposal";
 
 /**
  * The selected chat's live (accepted but not yet materialized) change row stream, delivered via
@@ -584,7 +593,12 @@ function getToolCallSummary(
     case "grep":
       return { verb: "Searched", target: tc.input.path ?? tc.input.workpiece };
     case "describeBinding":
-      return { verb: "Inspected", target: `${String(tc.input.name)} binding` };
+      return {
+        verb: "Inspected",
+        target: tc.input.gadget === undefined
+          ? `${String(tc.input.name)} binding`
+          : `${String(tc.input.name)} binding of ${tc.input.gadget}`,
+      };
     case "setBindingHook":
       return {
         verb: "Connected",
@@ -642,6 +656,8 @@ function getToolCallSummary(
       return { verb: "Listed connectable resources", target: tc.input.vendorId };
     case "requestConnection":
       return { verb: "Requested connection", target: tc.input.vendorId };
+    case "createExternalResource":
+      return { verb: "Created", target: tc.input.title };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
@@ -741,6 +757,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Listed connectable resources`;
     case "requestConnection":
       return count === 1 ? "Requested a connection" : `Requested ${count} connections`;
+    case "createExternalResource":
+      return `Created ${pluralize(count, "external resource")}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -843,6 +861,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return "Requesting a connection";
+    case "createExternalResource": return "Creating external resource";
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -869,6 +888,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return `Requesting ${pluralize(count, "connection")}`;
+    case "createExternalResource": return `Creating ${pluralize(count, "external resource")}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -1479,6 +1499,11 @@ const ToolCallDetails = memo(function ToolCallDetails(
             </>
           )}
         </>
+      ) : tc.toolName === "describeBinding" && tc.output !== undefined ? (
+        // The description names the binding it describes, so the input would only repeat it.
+        <pre className="max-h-96 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+          {tc.output}
+        </pre>
       ) : (
         <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
           {JSON.stringify(tc.input, null, 2)}
@@ -1768,11 +1793,6 @@ interface MessageState {
   // Map from merge/revert sequence to the timestamp they reference
   mergeTimestamps: Map<number, Date>; // sequence -> timestamp of merged-through message
   revertTimestamps: Map<number, Date>; // sequence -> timestamp of reverted-from message
-
-  // The accumulated unmerged/unreverted changes (for the proposed changes view). An entry's
-  // `change` is absent for batches that record only gadget creations/binding additions; such
-  // batches still count as proposed changes (they are accepted and reverted like code edits).
-  activeChanges: { sequence: number; change?: CodeChange }[];
 }
 
 type ChatDisplayEntry =
@@ -1821,6 +1841,19 @@ type ChatDisplayEntry =
       type: "savedChanges";
       key: string;
       message: ChangeChatMessage;
+    }
+  | {
+      // Blueprint releases someone proposed merging into gadgets (see
+      // GadgetClient.applyBlueprint()). Unlike saved edits, the row outlives the proposal's
+      // acceptance or discard: the agent's review of a merge follows it with no message from
+      // anyone in between, and would otherwise be answering nothing.
+      type: "blueprintProposal";
+      key: string;
+      message: ChangeChatMessage;
+      merges: BlueprintMerge[];
+      status: "pending" | "merged" | "reverted";
+      /** Whether an agent has written in the chat since, as the one reviewing a merge does. */
+      agentFollowed: boolean;
     };
 
 function isObservationActionMessage(msg: AiChatMessage): msg is ObservationChatMessage {
@@ -2002,6 +2035,8 @@ export function buildChatDisplayEntries(
   boundaries: readonly CompactionBoundary[] = [],
   outputOf?: ToolOutputResolver,
 ): ChatDisplayEntry[] {
+  // Catalog changes are for the agent alone (see the "catalogChange" message).
+  messages = messages.filter(msg => msg.type !== "catalogChange");
   const result: ChatDisplayEntry[] = [];
   let lastAgentAuthorId: string | null = null;
 
@@ -2061,6 +2096,10 @@ export function buildChatDisplayEntries(
     msg.conversionBoundary !== true &&
     (changeStatus.get(msg.sequence) ?? "pending") === "pending";
 
+  // Whether a "changes" message gets a row of its own, which ends the run of work before it.
+  const startsOwnRow = (msg: AiChatMessage) =>
+    appliedBlueprintMerges(msg).length > 0 || isVisibleSavedChangesMessage(msg);
+
   for (let i = 0; i < messages.length; ) {
     const msg = messages[i];
     maybePushBoundaries(msg.sequence);
@@ -2109,7 +2148,17 @@ export function buildChatDisplayEntries(
     }
 
     if (msg.type === "changes") {
-      if (isVisibleSavedChangesMessage(msg)) {
+      const merges = appliedBlueprintMerges(msg);
+      if (merges.length > 0) {
+        result.push({
+          type: "blueprintProposal",
+          key: `blueprint-proposal-${msg.chatId}-${msg.sequence}`,
+          message: msg,
+          merges,
+          status: changeStatus.get(msg.sequence) ?? "pending",
+          agentFollowed: messages.slice(i + 1).some((later) => later.author.type === "agent"),
+        });
+      } else if (isVisibleSavedChangesMessage(msg)) {
         result.push({
           type: "savedChanges",
           key: `saved-changes-${msg.chatId}-${msg.sequence}`,
@@ -2138,7 +2187,7 @@ export function buildChatDisplayEntries(
       while (j < messages.length) {
         const nextMsg = messages[j];
         if (nextMsg.type === "changes") {
-          if (isVisibleSavedChangesMessage(nextMsg)) break;
+          if (startsOwnRow(nextMsg)) break;
           j++;
           continue;
         }
@@ -2178,7 +2227,7 @@ export function buildChatDisplayEntries(
       while (j < messages.length) {
         const nextMsg = messages[j];
         if (nextMsg.type === "changes") {
-          if (isVisibleSavedChangesMessage(nextMsg)) break;
+          if (startsOwnRow(nextMsg)) break;
           j++;
           continue;
         }
@@ -2277,42 +2326,22 @@ function rhythmTopClass(
   return "mt-4";
 }
 
-export function computeMessageStates(
-  messages: AiChatMessage[],
-  // Compaction boundary bounding the oldest loaded page, if the chat has one.
-  compacted?: CompactionBoundary,
-): MessageState {
+export function computeMessageStates(messages: AiChatMessage[]): MessageState {
   const changeStatus = new Map<number, "pending" | "merged" | "reverted">();
   const mergeTimestamps = new Map<number, Date>();
   const revertTimestamps = new Map<number, Date>();
 
-  // Track active changes as we scan (for proposed changes computation)
-  let updates: { sequence: number; change?: CodeChange }[] = [];
-
-  // The boundary carries the still-proposed pre-boundary changes composed into one change. Fold it
-  // in at the last pre-boundary sequence, so it counts as proposed and a later merge or revert
-  // reaching across the boundary still resolves it. Skipped once the page before the boundary has
-  // loaded, since its own "changes" messages would then count the same edits again.
-  //
-  // Only the change appears here, because that is all these entries are read for: reconstructing
-  // the proposed code. A prefix that only created gadgets carries none, and stays reachable
-  // through the server's own cut -- see the accept-changes banner.
-  if (
-    compacted?.proposedChange !== undefined &&
-    (messages.length === 0 || messages[0].sequence >= compacted.to)
-  ) {
-    updates.push({ sequence: compacted.to - 1, change: compacted.proposedChange });
-  }
+  // Sequences of the changes still proposed as we scan
+  let pending: number[] = [];
 
   for (let msg of messages) {
     if (msg.type === "changes") {
-      updates.push({ sequence: msg.sequence, change: msg.change });
+      pending.push(msg.sequence);
       changeStatus.set(msg.sequence, "pending");
     } else if (msg.type === "merge") {
       // Mark changes as merged and drop from active set
-      while (updates.length > 0 && updates[0].sequence <= msg.mergeThrough) {
-        const merged = updates.shift()!;
-        changeStatus.set(merged.sequence, "merged");
+      while (pending.length > 0 && pending[0] <= msg.mergeThrough) {
+        changeStatus.set(pending.shift()!, "merged");
       }
       // Find timestamp for the merged-through message
       const refMsg = messages.find((m) => m.sequence === msg.mergeThrough);
@@ -2321,12 +2350,8 @@ export function computeMessageStates(
       }
     } else if (msg.type === "revert") {
       // Mark changes as reverted and drop from active set
-      while (
-        updates.length > 0 &&
-        updates[updates.length - 1].sequence >= msg.revertFrom
-      ) {
-        const reverted = updates.pop()!;
-        changeStatus.set(reverted.sequence, "reverted");
+      while (pending.length > 0 && pending[pending.length - 1] >= msg.revertFrom) {
+        changeStatus.set(pending.pop()!, "reverted");
       }
       // Find timestamp for the reverted-from message
       const refMsg = messages.find((m) => m.sequence === msg.revertFrom);
@@ -2336,17 +2361,13 @@ export function computeMessageStates(
     }
   }
 
-  return {
-    changeStatus,
-    mergeTimestamps,
-    revertTimestamps,
-    activeChanges: updates,
-  };
+  return { changeStatus, mergeTimestamps, revertTimestamps };
 }
 
 /**
  * The durable part of a chat's uncommitted code state (see ChatCodeChanges): the current
- * epoch's non-reverted "changes" messages composed into one change, plus the generation revision
+ * epoch's non-reverted "changes" messages composed into one change, each gadget's from its last
+ * pin declaration on (see composeEpochChanges), plus the generation revision
  * their watermarks reach. `codeBase` is the chat's current ChatCodeBase; only messages at or
  * after its `epoch` participate ("at" matters for a migrated chat, whose epoch points at its own
  * conversionBoundary changes message) -- accepting changes resets the chat's code base, so
@@ -2355,37 +2376,31 @@ export function computeMessageStates(
  * the code view reads from the same metadata.
  *
  * The oldest loaded compaction boundary stands in for the pages before it -- its proposedChange
- * blob, unless a loaded revert reached across the boundary -- and drops out once those pages
- * load, exactly like computeMessageStates' active-changes seeding. The blob folds in at
- * sequence `to - 1`, so an epoch past that excludes it like any other pre-epoch content.
+ * blob, which the server refolds whenever a revert reaches across the boundary -- and drops out
+ * once those pages load, since their own "changes" messages then count the same edits. The blob
+ * covers sequences up to `to - 1`, so an epoch past that excludes it like any other pre-epoch
+ * content.
  */
 export function computeChatEpochChanges(
   messages: AiChatMessage[],
   compacted?: CompactionBoundary,
   codeBase?: ChatCodeBase,
 ): { epochChange?: CodeChange; rowsThrough: number } {
-  const { changeStatus } = computeMessageStates(messages, compacted);
+  const { changeStatus } = computeMessageStates(messages);
   const epoch = codeBase?.epoch;
   const generation = codeBase?.generation ?? 0;
-  const changes: CodeChange[] = [];
+  let seed: CodeChange | undefined;
   let rowsThrough = 0;
 
   if (compacted && (messages.length === 0 || messages[0].sequence >= compacted.to) &&
       (epoch === undefined || compacted.to - 1 >= epoch)) {
-    // The boundary's proposed-changes entry is folded in at sequence `to - 1` by
-    // computeMessageStates, so a revert reaching across the boundary marks that sequence.
-    if (compacted.proposedChange !== undefined &&
-        changeStatus.get(compacted.to - 1) !== "reverted") {
-      changes.push(compacted.proposedChange);
-    }
+    seed = compacted.proposedChange;
   }
 
-  for (const msg of messages) {
-    if (msg.type !== "changes" || (epoch !== undefined && msg.sequence < epoch) ||
-        changeStatus.get(msg.sequence) === "reverted") {
-      continue;
-    }
-    if (msg.change !== undefined) changes.push(msg.change);
+  const batches = messages.filter((msg): msg is ChangeChatMessage =>
+    msg.type === "changes" && (epoch === undefined || msg.sequence >= epoch) &&
+    changeStatus.get(msg.sequence) !== "reverted");
+  for (const msg of batches) {
     // Revisions restart per generation, so only the current generation's watermarks position
     // the live-row cursor (an older generation's rows were retired by its closing bump).
     if (msg.watermark !== undefined && msg.watermark.changesGeneration === generation) {
@@ -2393,26 +2408,23 @@ export function computeChatEpochChanges(
     }
   }
 
-  return {
-    epochChange:
-        changes.length === 0 ? undefined : changes.reduce((a, b) => composeCodeChange(a, b)),
-    rowsThrough,
-  };
+  return { epochChange: composeEpochChanges(batches, seed), rowsThrough };
 }
 
-function inferSelectedModelFromMessages(messages: AiChatMessage[]): string | null {
+// The agent that last spoke in the chat: the author of the most recent agent message or agent error.
+function inferChatAgentFromMessages(messages: AiChatMessage[]): AiChatAuthorInfo | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
 
     if (msg.type === "error") {
       if (msg.author.type === "agent") {
-        return msg.author.id;
+        return msg.author;
       }
       continue;
     }
 
     if (msg.type === "message") {
-      return msg.author.type === "agent" ? msg.author.id : null;
+      return msg.author.type === "agent" ? msg.author : null;
     }
   }
 
@@ -2433,6 +2445,9 @@ function fallbackToStoredModelSelection(
 interface ChatInterfaceProps {
   workspaceId: string | undefined;
   overseer: RpcStub<Overseer>;
+  // True once the workspace has read restricted data (GadgetMetadata.containsRestrictedData).
+  // Latched actions are never auto-approved, so the always-approve affordance is hidden.
+  restricted?: boolean;
   selectedChatId: number | null;
   onNavigateToChat: (
     chatId: number | null,
@@ -2449,6 +2464,9 @@ interface ChatInterfaceProps {
   // ChatLiveEditPreviews).
   onLiveEditPreviewsChange?: (previews: ChatLiveEditPreviews | undefined) => void;
   onStreamingActiveFileChange?: (chatId: number, file: ActiveFileTarget | null | undefined) => void;
+  // The selected chat's uncommitted content, which accepting its changes first checks for merge
+  // conflicts nobody resolved. Without it the changes are accepted unchecked.
+  chatContent?: ChatContentReader;
   pendingConsoleLogCount: number;
   consoleLogPreview: string;
   consoleLogSeverity: "error" | "warn" | "info";
@@ -2638,12 +2656,14 @@ function getOrCreateProvisionalToolCall(
 function ChatInterface({
   workspaceId,
   overseer,
+  restricted,
   selectedChatId,
   onNavigateToChat,
   onChatChangesChange,
   onLiveRowsChange,
   onLiveEditPreviewsChange,
   onStreamingActiveFileChange,
+  chatContent,
   pendingConsoleLogCount,
   consoleLogPreview,
   consoleLogSeverity,
@@ -2729,6 +2749,9 @@ function ChatInterface({
   // decision in the update-from-mainline dialog.
   const [staleAcceptChatId, setStaleAcceptChatId] = useState<number | null>(null);
   const [isUpdatingFromMainline, setIsUpdatingFromMainline] = useState(false);
+  // The conflict markers that held up an accept of the selected chat's changes, awaiting the
+  // user's decision in the unresolved-conflicts dialog.
+  const [unresolvedConflicts, setUnresolvedConflicts] = useState<UnresolvedConflict[] | null>(null);
 
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(
     new Set(),
@@ -2855,18 +2878,38 @@ function ChatInterface({
   const toastsRef = useRef(toasts);
   toastsRef.current = toasts;
 
-  // Refetches a loaded chat's newest page. Held in a ref because the chat subscriber is constructed
-  // once, while `overseer` and `cacheHistoryPage` are recreated each render.
-  const refreshBoundaryRef = useRef<(chatId: number) => void>(() => {});
-  refreshBoundaryRef.current = (chatId: number) => {
-    void (async () => {
-      try {
-        cacheHistoryPage(chatId, await overseer.getChatHistory(chatId));
-        forceUpdate();
-      } catch (err) {
-        reportIssue("chat.compaction-boundary-refresh", err, {handled: true});
-      }
-    })();
+  // Chats whose oldest loaded boundary a revert reached past. The server refolded that boundary's
+  // proposed changes, so the code view waits for its page to be refetched: the revert's generation
+  // bump would otherwise rebuild the chat's content on the old blob, and the OT client rebuilds
+  // only on a generation change. A failed refetch keeps the hold until the next subscription.
+  const staleBoundaryChatsRef = useRef(new Set<number>());
+
+  // Refetches the page carrying one of a loaded chat's boundaries: the newest page, or the one
+  // before `beforeSequence`, and resolves whether it loaded. Held in a ref because the chat
+  // subscriber is constructed once, while `overseer` and `cacheHistoryPage` are recreated each
+  // render.
+  const refreshBoundaryRef =
+    useRef<(chatId: number, beforeSequence?: number) => Promise<boolean>>(async () => false);
+  refreshBoundaryRef.current = async (chatId: number, beforeSequence?: number) => {
+    try {
+      cacheHistoryPage(chatId, await overseer.getChatHistory(chatId, beforeSequence));
+      forceUpdate();
+      return true;
+    } catch (err) {
+      reportIssue("chat.compaction-boundary-refresh", err, {handled: true});
+      return false;
+    }
+  };
+
+  // Refetches a stale chat's oldest boundary, then releases its code view. The page before
+  // `to + 1` is the one message at that boundary, so the server returns exactly that checkpoint.
+  // Reads only refs and a state setter, so the subscriber's first-render copy stays current.
+  const refreshStaleBoundary = async (chatId: number) => {
+    let oldest = cacheRef.current.compacted.get(chatId)?.[0];
+    if (oldest === undefined || await refreshBoundaryRef.current(chatId, oldest.to + 1)) {
+      staleBoundaryChatsRef.current.delete(chatId);
+      setProposedChangesVersion((prev) => prev + 1);
+    }
   };
 
   // Apply page-level cursor + user-select only while a resize is in progress.
@@ -2917,7 +2960,7 @@ function ChatInterface({
 
   // Get sorted list of chats from cache
   const chatList = useMemo(
-    () => Array.from(cacheRef.current.chats.values()).sort(
+    () => Array.from(cacheRef.current.chats.values()).toSorted(
       (a, b) => b.lastActive.getTime() - a.lastActive.getTime(),
     ),
     [chatListVersion],
@@ -3014,11 +3057,7 @@ function ChatInterface({
     if (selectedChatId === null) return [];
     return cacheRef.current.compacted.get(selectedChatId) ?? [];
   }, [selectedChatId, updateCounter]);
-  const messageStates = useMemo(
-    // The oldest boundary is the one whose proposed changes no loaded message accounts for.
-    () => computeMessageStates(currentMessages, currentCompactions[0]),
-    [currentMessages, currentCompactions],
-  );
+  const messageStates = useMemo(() => computeMessageStates(currentMessages), [currentMessages]);
   // A pending agent connection request blocks the composer: the user must accept ("Set up") or deny
   // it before continuing the conversation.
   const hasPendingConnectionRequest = useMemo(
@@ -3235,6 +3274,8 @@ function ChatInterface({
 
   const isAgentActive = !!currentChatMetadata?.activeAgent;
   const activeAgent = currentChatMetadata?.activeAgent;
+  // Names the chat's own model in the composer even when the picker no longer offers it.
+  const chatAgent = activeAgent ?? inferChatAgentFromMessages(currentMessages);
 
   // Notify parent when agent active state changes
   const onAgentActiveChangeRef = useRef(onAgentActiveChange);
@@ -3301,6 +3342,7 @@ function ChatInterface({
   useEffect(() => {
     setDiscardChangesTarget(null);
     setStaleAcceptChatId(null);
+    setUnresolvedConflicts(null);
   }, [selectedChatId]);
 
   // Initialize title input when selecting a chat
@@ -3315,21 +3357,10 @@ function ChatInterface({
     if (selectedChatId === null) {
       setSelectedModel(getStoredSelectedModel(availableModels));
     } else {
-      // For existing threads:
-      // 1. If an AI agent is currently active, use that agent's model
-      if (activeAgent) {
-        setSelectedModel(activeAgent.id);
-      } else {
-        // 2. Otherwise, derive the model from the most recent agent message or agent error.
-        setSelectedModel(
-          fallbackToStoredModelSelection(
-            inferSelectedModelFromMessages(currentMessages),
-            availableModels,
-          ),
-        );
-      }
+      // An existing thread takes its active agent's model, else the one that last spoke.
+      setSelectedModel(fallbackToStoredModelSelection(chatAgent?.id ?? null, availableModels));
     }
-  }, [selectedChatId, availableModels, currentMessages, activeAgent]);
+  }, [selectedChatId, availableModels, chatAgent?.id]);
 
   // Keep the ref in sync with selectedChatId state
   useEffect(() => {
@@ -3348,9 +3379,10 @@ function ChatInterface({
     ? JSON.stringify(currentChatMetadata.codeBase ?? null) : undefined;
   useEffect(() => {
     if (selectedChatId === null || currentCodeBaseSignature === undefined ||
-        !cacheRef.current.messages.has(selectedChatId)) {
-      // No chat selected, or its metadata or history hasn't loaded yet -- the code view can't
-      // build the chat's doc until both have.
+        !cacheRef.current.messages.has(selectedChatId) ||
+        staleBoundaryChatsRef.current.has(selectedChatId)) {
+      // No chat selected, its metadata or history hasn't loaded yet, or a revert left its oldest
+      // boundary stale -- the code view can't build the chat's doc until all are current.
       onChatChangesChange?.(undefined);
       return;
     }
@@ -3438,24 +3470,13 @@ function ChatInterface({
         resetEditPreviews(chat.id);
       }
 
-      // A revert reaching across a boundary rolls compaction back, lowering or clearing
-      // `compactedTo` and deleting the checkpoints above it. Drop those here so their markers stop
-      // claiming history that is whole again.
-      let boundaries = cacheRef.current.compacted.get(chat.id);
-      if (boundaries !== undefined) {
-        let live = boundaries.filter(({to}) => to <= (chat.compactedTo ?? -1));
-        if (live.length < boundaries.length) cacheRef.current.compacted.set(chat.id, live);
-      }
-
       // A compaction that lands while the chat is open publishes a boundary the client only gets
       // with a page, so refetch instead of waiting for a reload. Asking whether that boundary is
       // already loaded makes this idempotent: paging back adds boundaries rather than replacing
-      // them, so an extra fetch can neither miss a compaction nor undo an expansion. Rolling the
-      // last boundary away needs the same fetch, since the history it used to hide is live again.
-      if (cacheRef.current.messages.has(chat.id) && (chat.compactedTo === undefined
-          ? prevChat?.compactedTo !== undefined
-          : !cacheRef.current.compacted.get(chat.id)?.some(({to}) => to === chat.compactedTo))) {
-        refreshBoundaryRef.current(chat.id);
+      // them, so an extra fetch can neither miss a compaction nor undo an expansion.
+      if (cacheRef.current.messages.has(chat.id) && chat.compactedTo !== undefined &&
+          !cacheRef.current.compacted.get(chat.id)?.some(({to}) => to === chat.compactedTo)) {
+        void refreshBoundaryRef.current(chat.id);
       }
 
       // A generation bump obsoletes buffered rows: a *destructive* bump (revert / draft
@@ -3564,6 +3585,16 @@ function ChatInterface({
         setProposedChangesVersion((prev) => prev + 1);
       }
 
+      // A revert reaching past the oldest loaded boundary changed it on the server; see
+      // staleBoundaryChatsRef.
+      if (msg.type === "revert") {
+        let oldest = cacheRef.current.compacted.get(msg.chatId)?.[0];
+        if (oldest !== undefined && msg.revertFrom < oldest.to) {
+          staleBoundaryChatsRef.current.add(msg.chatId);
+          void refreshStaleBoundary(msg.chatId);
+        }
+      }
+
       // A "changes" message's watermark absorbs the rows it materialized; drop our copies (see
       // AiChatMessageBody.watermark). Rows of other generations are untouched -- revisions
       // restart per generation, so an unqualified prune could clear the wrong stream's rows.
@@ -3611,6 +3642,13 @@ function ChatInterface({
       }
 
       switch (event.type) {
+        case "streamReset":
+          // A failed model request is being retried: drop everything it streamed, as an error
+          // message would, so the retry's output doesn't append to the failed attempt's.
+          clearProvisionalTextState(provisional);
+          clearProvisionalCodeState(provisional);
+          resetEditPreviews(chatId);
+          break;
         case "compacting":
           provisional.compacting = true;
           break;
@@ -3762,6 +3800,7 @@ function ChatInterface({
 
         if (isMounted) {
           setIsSubscribed(true);
+          for (const chatId of staleBoundaryChatsRef.current) void refreshStaleBoundary(chatId);
 
           // After subscribing, load the list of chats and models
           // This is safe because subscription will catch any new activity
@@ -3979,7 +4018,11 @@ function ChatInterface({
       }
     } catch (err) {
       if (!logRpcFailure("Failed to send message:", err, { reportSite: "chat.send" })) {
-        toasts.add({ title: "Failed to send message", variant: "error" });
+        toasts.add({
+          title: "Failed to send message",
+          description: rpcFailureDescription(err),
+          variant: "error",
+        });
       }
       throw err;
     }
@@ -4002,7 +4045,11 @@ function ChatInterface({
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
-        toasts.add({ title: "Failed to start conversation", variant: "error" });
+        toasts.add({
+          title: "Failed to start conversation",
+          description: rpcFailureDescription(err),
+          variant: "error",
+        });
       }
       throw err;
     }
@@ -4139,8 +4186,58 @@ function ChatInterface({
       toasts.add({ title: "Changes accepted", variant: "success" });
     } catch (err) {
       console.error("Failed to accept changes:", err);
-      toasts.add({ title: "Failed to accept changes", variant: "error" });
+      toasts.add({
+        title: "Failed to accept changes",
+        description: rpcFailureDescription(err),
+        variant: "error",
+      });
     }
+  };
+
+  // What "Accept changes" does. The server merges whatever the chat's files hold, so leftover
+  // conflict markers are caught here: the files that the chat's merges listed as conflicted are
+  // searched for one, and finding any puts the decision to the user. Content that has not
+  // loaded cannot be searched, and holds nothing up. A file nobody has edited since its merge
+  // is read from the commit the chat is pinned at, which the merge wrote.
+  const overseerFileReader: CommitFileReader = {
+    listTree: (commitId) => overseer.listTree(commitId),
+    readFilesAtCommit: (commitId, paths) => overseer.readFilesAtCommit(commitId, paths),
+    listChangedPaths: (fromCommit, toCommit) => overseer.listChangedPaths(fromCommit, toCommit),
+  };
+  const handleAcceptChanges = async () => {
+    const chatId = selectedChatId;
+    const reader = chatContent?.chatId === chatId ? chatContent : undefined;
+    const content = reader?.read();
+    if (reader !== undefined && content !== undefined) {
+      const conflicted = listConflictedFiles(currentMessages, messageStates.changeStatus);
+      // What is searched is the content on screen, and what the server merges is the content
+      // it has been sent. While an edit is on its way the two differ, and the edit may be the
+      // one that removed the last marker.
+      if (conflicted.length > 0 && reader.hasLocalEdits()) {
+        toasts.add({
+          title: "Your latest edits are still being saved. Try accepting again in a moment.",
+        });
+        return;
+      }
+      const pins = currentChatMetadata?.codeBase?.pins ?? [];
+      let unresolved: UnresolvedConflict[];
+      try {
+        unresolved = await findUnresolvedConflicts(
+          conflicted, content,
+          (gadgetId) => pins.find((pin) => pin.gadgetId === gadgetId)?.baseCommit,
+          (commitId, paths) => commitFileStore.readFiles(overseerFileReader, commitId, paths));
+      } catch (err) {
+        console.error("Failed to check for merge conflicts:", err);
+        toasts.add({ title: "Failed to check the changes for merge conflicts", variant: "error" });
+        return;
+      }
+      if (selectedChatIdRef.current !== chatId) return;
+      if (unresolved.length > 0) {
+        setUnresolvedConflicts(unresolved);
+        return;
+      }
+    }
+    void handleMergeChanges();
   };
 
   // Merge mainline commits that landed after this chat's pins into the chat's uncommitted state
@@ -4168,8 +4265,14 @@ function ChatInterface({
         });
       }
     } catch (err) {
+      // The server refuses an update that needs a file too large to merge, in a message
+      // naming the file and what to do about it (see Overseer.updateChatFromMainline()).
       console.error("Failed to update from mainline:", err);
-      toasts.add({ title: "Failed to bring in the latest changes", variant: "error" });
+      toasts.add({
+        title: err instanceof Error && err.message
+          ? err.message : "Failed to bring in the latest changes",
+        variant: "error",
+      });
     } finally {
       setIsUpdatingFromMainline(false);
     }
@@ -4343,9 +4446,10 @@ function ChatInterface({
   const { alwaysApproveTag, isTagAutoApproved } =
     useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange);
 
-  const resolveAction = useResolveAction(overseer, setProcessingActions, (actionId, state) => {
-    if (applyOptimisticActionState(actionId, state)) forceUpdate();
-  });
+  const { resolveAction, creationAccountModal } =
+    useResolveAction(overseer, setProcessingActions, (actionId, state) => {
+      if (applyOptimisticActionState(actionId, state)) forceUpdate();
+    });
 
   // Handle enabling/disabling a bound hook from the chat thread.
   const handleToggleHook = async (actionId: number, hookId: number, enabled: boolean) => {
@@ -4359,7 +4463,7 @@ function ChatInterface({
       }
     } catch (err) {
       console.error("Failed to toggle hook:", err);
-      toasts.add({ title: `Failed to ${enabled ? "enable" : "disable"} hook`, variant: "error" });
+      toasts.add(hookToggleFailureToast(enabled, err));
       // Revert the optimistic update.
       if (applyOptimisticHookEnabled(actionId, !enabled)) forceUpdate();
     } finally {
@@ -4501,7 +4605,11 @@ function ChatInterface({
       await overseer.retryAgent(selectedChatId, selectedModel);
     } catch (err) {
       console.error("Failed to retry agent:", err);
-      toasts.add({ title: "Failed to retry agent", variant: "error" });
+      toasts.add({
+        title: "Failed to retry agent",
+        description: rpcFailureDescription(err),
+        variant: "error",
+      });
     }
   };
 
@@ -4527,6 +4635,23 @@ function ChatInterface({
 
       return null;
     },
+    [currentMessages, messageStates],
+  );
+
+  // A blueprint proposal of a release the gadget's history already holds writes no commit and
+  // pins nothing, and so is not among the chat's proposedChangeWorkpieces. Its record in the log
+  // is then all that says the chat has something to accept or discard (see
+  // AiChatMessageBody.blueprintMerges).
+  //
+  // TODO: Only the loaded pages of history are looked through. A chat reopened after a
+  // compaction loads what follows the checkpoint, so such a proposal recorded before it gets
+  // no accept or discard until the user scrolls back that far. The fix is the one described
+  // at listConflictedFiles(): the checkpoint carrying the pending merge records.
+  const hasPendingBlueprintProposal = useMemo(
+    () => currentMessages.some((msg) =>
+      msg.type === "changes" &&
+      (msg.blueprintMerges?.length ?? 0) > 0 &&
+      messageStates.changeStatus.get(msg.sequence) === "pending"),
     [currentMessages, messageStates],
   );
 
@@ -4862,8 +4987,9 @@ function ChatInterface({
               {!isDeleted && (
                 <div className="ml-3 flex flex-shrink-0 items-center self-center">
                   <HookToggle
+                    hookTitle={log.description.title}
                     enabled={log.enabled}
-                    disabled={isProc}
+                    pending={isProc}
                     onToggle={(enabled) => handleToggleHook(msg.actionId, log.hookId!, enabled)}
                   />
                 </div>
@@ -4936,8 +5062,10 @@ function ChatInterface({
     // Auto-approval target: offer "Always approve this type" only when enabling a rule would
     // actually apply this action -- a tagged action on a connection that the gatekeeper marked
     // auto-approvable. (A non-auto-approvable action stays a manual gate even with a rule; an
-    // auto-approvable action with an existing rule wouldn't still be pending.)
+    // auto-approvable action with an existing rule wouldn't still be pending.) Not offered while
+    // restricted.
     const autoApproveTarget =
+      !restricted &&
       log.gatekeeperId !== undefined && log.description.actionKind !== undefined &&
       log.description.autoApprovable === true
         ? {
@@ -4948,6 +5076,25 @@ function ChatInterface({
             actionLabel: log.description.title,
           }
         : undefined;
+
+    // While restricted the notices and the request follow the controls in DOM order, so the
+    // approve/deny buttons name them as their description. Ids derive from the action id: this is
+    // a render closure, not a component, so useId is unavailable, and one card renders per action.
+    const restrictedReview = restricted && isPending;
+    const noticeId = `action-${msg.actionId}-restricted-notice`;
+    const requestId = `action-${msg.actionId}-request`;
+    const fieldsId = `action-${msg.actionId}-fields`;
+    const incompleteId = `action-${msg.actionId}-incomplete-notice`;
+    const hasFields = entryFields(log).length > 0;
+    const incomplete = isPending && isDescriptionIncomplete(log);
+    const describedBy = restrictedReview
+      ? [
+        noticeId,
+        requestId,
+        ...(hasFields ? [fieldsId] : []),
+        ...(incomplete ? [incompleteId] : []),
+      ].join(" ")
+      : undefined;
 
     const actionControls = isPending ? (
       <>
@@ -4964,14 +5111,16 @@ function ChatInterface({
         )}
         <ResolveButton
           tone="deny"
-          onClick={() => void resolveAction(msg.actionId, "deny")}
+          onClick={() => void resolveAction(log, "deny")}
           disabled={isProc}
+          describedBy={describedBy}
         />
         <ResolveButton
           tone="approve"
           variant={isBlocking ? "filled" : "quiet"}
-          onClick={() => void resolveAction(msg.actionId, "approve")}
+          onClick={() => void resolveAction(log, "approve")}
           disabled={isProc}
+          describedBy={describedBy}
         />
       </>
     ) : null;
@@ -5018,17 +5167,16 @@ function ChatInterface({
                   </span>
                   {resourceMeta}
                 </div>
-                <div className={`chat-panel mt-1 max-h-[200px] overflow-y-auto pr-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
+                {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2" />}
+                <div id={requestId} className={`chat-panel mt-1 pr-1 text-[13px] leading-[18px] text-kumo-subtle ${restricted ? "" : "max-h-[200px] overflow-y-auto"} ${styles.markdownContent}`}>
                   <MarkdownMessage message={log.description.description} />
                 </div>
-                {entryFields(log).length > 0 && (
-                  <div className="chat-panel mt-2 max-h-[360px] overflow-y-auto pr-1">
-                    <ActionFields fields={entryFields(log)} />
+                {hasFields && (
+                  <div id={fieldsId} className={`chat-panel mt-2 pr-1 ${restricted ? "" : "max-h-[360px] overflow-y-auto"}`}>
+                    <ActionFields fields={entryFields(log)} uncapped={restricted} />
                   </div>
                 )}
-                {isDescriptionIncomplete(log) && (
-                  <IncompleteDescriptionNotice className="mt-2" />
-                )}
+                {incomplete && <IncompleteDescriptionNotice id={incompleteId} className="mt-2" />}
               </div>
               <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
                 {actionControls}
@@ -5086,15 +5234,16 @@ function ChatInterface({
         )}
         {showDescription && (
           <div className="themed-surface-inset ml-8 mt-1 space-y-1.5 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
-            <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 ${styles.markdownContent}`}>
+            {restrictedReview && <RestrictedApprovalNotice id={noticeId} />}
+            <div id={requestId} className={`chat-panel pr-1 ${restrictedReview ? "" : "max-h-[200px] overflow-y-auto"} ${styles.markdownContent}`}>
               <MarkdownMessage message={log.description.description} />
             </div>
-            {entryFields(log).length > 0 && (
-              <div className="chat-panel max-h-[360px] overflow-y-auto pr-1">
-                <ActionFields fields={entryFields(log)} />
+            {hasFields && (
+              <div id={fieldsId} className={`chat-panel pr-1 ${restrictedReview ? "" : "max-h-[360px] overflow-y-auto"}`}>
+                <ActionFields fields={entryFields(log)} uncapped={restrictedReview} />
               </div>
             )}
-            {isPending && isDescriptionIncomplete(log) && <IncompleteDescriptionNotice />}
+            {incomplete && <IncompleteDescriptionNotice id={incompleteId} />}
             {resourceMeta}
           </div>
         )}
@@ -5325,7 +5474,7 @@ function ChatInterface({
             onSend={handleNewChatSend}
             isAgentActive={false}
             models={availableModels}
-            selectedModel={selectedModel}
+            selectedModel={selectedModel === null ? null : { id: selectedModel }}
             onModelChange={handleModelChange}
             showThinkingTraces={showThinkingTraces}
             onToggleThinkingTraces={toggleShowThinkingTraces}
@@ -5632,11 +5781,19 @@ function ChatInterface({
                           ? `${actor} created ${createdGadgets.length === 1 ? "gadget" : "gadgets"} ${
                               createdGadgets.map((g) => `“${g.title}”`).join(", ")}`
                           : `${actor} saved edits`;
-                        // A still-proposed mainline merge can't be reverted: it advanced the
-                        // chat's pins, and erasing it would let a later accept silently overwrite
-                        // the mainline content it brought in (the server refuses too).
-                        const discardLabel = mainlineMerge
+                        // A mainline merge recorded before merges were commits can't be
+                        // reverted while still proposed: it advanced the chat's pins with no
+                        // record of where they were, and erasing it would let a later accept
+                        // silently overwrite the mainline content it brought in (the server
+                        // refuses too). One that records its `gadgets` puts the pins back.
+                        const irrevocableMerge =
+                          mainlineMerge !== undefined && mainlineMerge.gadgets === undefined;
+                        const discardLabel = irrevocableMerge
                           ? "This update can't be discarded: it brought in changes already accepted elsewhere. Edit the files instead."
+                          : mainlineMerge
+                          ? entry.message.sequence === lastDurablePendingChange?.sequence
+                            ? "Discard this update"
+                            : "Discard this update and later changes"
                           : getSavedEditsDiscardLabel(
                               entry.message.sequence === lastDurablePendingChange?.sequence,
                               createdWorkpiecesOf(entry.message),
@@ -5658,7 +5815,7 @@ function ChatInterface({
                                 <Tooltip content={discardLabel} asChild>
                                   <button
                                     type="button"
-                                    disabled={isAgentActive || mainlineMerge !== undefined}
+                                    disabled={isAgentActive || irrevocableMerge}
                                     onClick={() => handleRevertChanges(entry.message.sequence)}
                                     className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
                                     aria-label={discardLabel}
@@ -5677,6 +5834,21 @@ function ChatInterface({
                                 </Tooltip>
                               </div>
                             </div>
+                          </div>
+                        );
+                      }
+
+                      if (entry.type === "blueprintProposal") {
+                        return (
+                          <div key={entry.key} className={`${entryTopClass} max-w-[860px] space-y-2`}>
+                            {entry.merges.map((merge) => (
+                              <BlueprintProposalNotice
+                                key={merge.gadgetId}
+                                merge={merge}
+                                status={entry.status}
+                                reviewed={entry.agentFollowed || isAgentActive}
+                              />
+                            ))}
                           </div>
                         );
                       }
@@ -6304,7 +6476,10 @@ function ChatInterface({
                     onSend={handleSend}
                     isAgentActive={isAgentActive}
                     models={availableModels}
-                    selectedModel={selectedModel}
+                    selectedModel={selectedModel === null ? null : {
+                      id: selectedModel,
+                      name: chatAgent?.id === selectedModel ? chatAgent.name : undefined,
+                    }}
                     onModelChange={handleModelChange}
                     pendingConsoleLogCount={pendingConsoleLogCount}
                     consoleLogPreview={consoleLogPreview}
@@ -6329,7 +6504,8 @@ function ChatInterface({
                     }
                     draftUpdateBanner={(() => {
                       if (!currentChatMetadata ||
-                          !chatHasProposedChanges(currentChatMetadata)) return null;
+                          !(chatHasProposedChanges(currentChatMetadata) ||
+                            hasPendingBlueprintProposal)) return null;
 
                       // Accepting always merges everything the chat proposes (drafts swept in,
                       // no partial accepts -- see Overseer.mergeChanges()), so the banner needs
@@ -6364,7 +6540,7 @@ function ChatInterface({
                               : "Keep this draft and make it the gadget's current version."} asChild>
                             <WorkshopButton
                               disabled={changesActionsDisabled}
-                              onClick={() => handleMergeChanges()}
+                              onClick={() => { void handleAcceptChanges(); }}
                               tone="primary"
                               className="!h-7 !cursor-pointer !rounded-md !border-transparent !shadow-none gap-1 text-[12px]"
                             >
@@ -6457,6 +6633,17 @@ function ChatInterface({
         </Dialog>
       </Dialog.Root>
 
+      {unresolvedConflicts !== null && (
+        <UnresolvedConflictsDialog
+          conflicts={unresolvedConflicts}
+          onCancel={() => setUnresolvedConflicts(null)}
+          onAcceptAnyway={() => {
+            setUnresolvedConflicts(null);
+            void handleMergeChanges();
+          }}
+        />
+      )}
+
       <DeleteConfirmationDialog
         open={deleteTarget !== null}
         title="Delete conversation?"
@@ -6468,7 +6655,8 @@ function ChatInterface({
         onConfirm={handleDeleteConfirm}
       />
 
-      {autoApproveConfirm && (
+      {/* The workspace latched: the affordance is gone and confirming could only error. */}
+      {!restricted && autoApproveConfirm && (
         <AutoApproveConfirmDialog
           open
           actionLabel={autoApproveConfirm.actionLabel}
@@ -6485,6 +6673,8 @@ function ChatInterface({
           }}
         />
       )}
+
+      {creationAccountModal}
 
       {/* Accept flow for an agent connection request: pre-seeds the gatekeeper modal and, on
           creation, finalizes the request so the agent resumes. */}

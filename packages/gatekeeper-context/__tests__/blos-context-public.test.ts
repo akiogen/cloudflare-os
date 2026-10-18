@@ -28,7 +28,10 @@ function contextApi(isAdmin: boolean) {
   const collections = { idFromName: (name: string) => name, get: () => collection };
   const userLibraries = {
     idFromName: (name: string) => name,
-    get: () => ({ hasOwned: async () => false, createOwnedCollection: async () => {} }),
+    get: () => ({
+      hasOwned: async () => false, createOwnedCollection: async () => {},
+      listOwnedCollections: async () => [],
+    }),
   };
   const registries = {
     getByName: () => ({
@@ -37,7 +40,7 @@ function contextApi(isAdmin: boolean) {
     }),
   };
   const api = new ContextApiImpl(
-      {} as Args[0], DOMAIN, "account-1", isAdmin,
+      { CONTEXT_COLLECTIONS: { get: async () => null } } as unknown as Args[0], DOMAIN, "account-1", isAdmin,
       collections as unknown as Namespace as Args[4],
       userLibraries as unknown as Namespace as Args[5],
       registries as unknown as Namespace as Args[6]);

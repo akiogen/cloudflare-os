@@ -17,8 +17,9 @@ export default {
        * `src/generated/bundled-blueprints.ts` depends on it -- `cache: false` is per-task, so running
        * the generator inside a cached task strips the override however its siblings are declared.
        *
-       * `cache: false` rather than `env: ['BUNDLED_BLUEPRINTS_DIR']`: `env` fingerprints the value,
-       * not the contents of the directory it names, so edits inside it would replay a stale module.
+       * `cache: false` rather than `cache: { env: ['BUNDLED_BLUEPRINTS_DIR'] }`: `env` fingerprints
+       * the value, not the contents of the directory it names, so edits inside it would replay a
+       * stale module.
        *
        * The generator itself, and the blueprints it bundles by default, are `@gadgets/bundled-blueprints`;
        * the script here is the command line around it, because the module it writes is this package's.
@@ -35,9 +36,9 @@ export default {
        * Builds the validated entrypoint shared by integration-test file workers.
        *
        * Cached with the `build:app` shape: the build writes `.wrangler/validate/` back into the
-       * package automatic tracking treats as input, so without dropping that tree from `input`
+       * package automatic tracking treats as input, so without dropping that tree from `cache.input`
        * nothing ever caches. Workspace-wide, since tracking reaches past this package and any
-       * sibling that ran `wrangler dev` would otherwise guarantee a miss. The explicit `output`
+       * sibling that ran `wrangler dev` would otherwise guarantee a miss. The explicit `cache.output`
        * matters as much: a cache hit has to leave the tree on disk, because
        * `@gadgets/integration-tests` reads it rather than rebuilding it.
        *
@@ -50,16 +51,18 @@ export default {
        *
        * Caching means this now runs with a stripped environment. `scripts/env-passthrough.test.ts`
        * is the guard: if capnweb-validate ever starts reading an ambient var, it fails there rather
-       * than replaying a stale tree. The watchdog's own off switch is the one variable declared.
+       * than replaying a stale tree. The watchdog's policy variables are declared explicitly.
        */
       'build:integration-worker': {
         command: withTestTimeout('capnweb-validate build --out .wrangler/validate'),
-        env: TESTS_WITH_TIMEOUT_ENV,
         dependsOn: [
           '@gadgets/typed-storage#build', 'build:bundled-blueprints', 'build:browser-runtime',
         ],
-        input: [{ auto: true }, { pattern: '!**/.wrangler/**', base: 'workspace' }],
-        output: ['.wrangler/validate/**'],
+        cache: {
+          env: TESTS_WITH_TIMEOUT_ENV,
+          input: [{ auto: true }, { pattern: '!**/.wrangler/**', base: 'workspace' }],
+          output: ['.wrangler/validate/**'],
+        },
       },
       /**
        * Two programs: this package's `src/` under its generated Workers types, and `browser/` under
@@ -75,12 +78,7 @@ export default {
         cache: false,
       },
       /**
-       * The unit suite needs a longer idle threshold than the watchdog's default. Import dominates
-       * its runtime (`import 261s, tests 19s` on a 4-vCPU runner, alongside three other workerd
-       * fleets), and vitest prints only as files complete, so a healthy run's silences stretch past
-       * the default once the machine is contended. The wall-clock backstop still bounds a real hang.
-       *
-       * The integration config is one file and keeps the default.
+       * Import-heavy unit tests need a longer idle allowance; integration uses the shared defaults.
        */
       test: {
         ...vitestTask([

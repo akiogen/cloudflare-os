@@ -17,9 +17,9 @@ sequencing that span more than one symbol.
 
 These sequences compose Layer-1 leaves; the kit ships no connect assembly. The conformance account
 in [`__tests__/workerd/conformance/gatekeeper.ts`](__tests__/workerd/conformance/gatekeeper.ts) is
-the executable reference. Production gatekeepers stage and commit reconnects, but none fences a
-connect on its connection generation yet, so the fenced variants below are the recommended shape
-rather than established practice. `disposeMintIfSafe`, `revokeLiveGrantBestEffort`, and `toGrant`
+the executable reference. Production gatekeepers stage and commit reconnects; GitLab also fences
+each connect on its connection generation, as the variants below do, and GitHub does not yet.
+`disposeMintIfSafe`, `revokeLiveGrantBestEffort`, and `toGrant`
 are gatekeeper-owned placeholders, not kit exports; `client` is an `OAuthClient` (see
 [OAuth token endpoint](#oauth-token-endpoint)).
 
@@ -54,6 +54,13 @@ The handshake holds one OAuth nonce, so a second `advanceToOAuth` invalidates th
 callback. A claimed attempt can still race with a connection change. Use `startedUnder` in the
 matching initial or reconnect path below.
 
+Decide which path an attempt takes when its link is minted, not when it is used: pass that intent to
+`putInitiation` as metadata, which `advanceToOAuth` carries into the OAuth record (its own `extra`
+wins a name clash) and `claimOAuth` returns. Inferring it at callback time from whether credentials
+exist misroutes a reconnect whose account was disconnected meanwhile. Make the absent value the safe
+one — record `firstConnect: true` from the connect entry point, so anything else, a link minted
+before the field existed included, stages its grant as a reconnect.
+
 ### Initial connect
 
 An initial connect may persist its complete grant in the new account before calling
@@ -75,6 +82,20 @@ return htmlResponse(connectHandoffPageHtml(handoff));
 
 Without `ifGeneration`, `connect()` writes unconditionally. That remains appropriate for a pasted
 token or form submission with no round trip to fence.
+
+Call `complete()` at most once per account. Each call stages another Workshop ticket, and an
+unredeemed ticket revokes the account, so a second call can destroy the connection the first made,
+even one that threw or lost its reply. A flow that claimed a single-use nonce reaches `complete()`
+once already. A flow whose link or form has no single-use nonce records the attempt: refuse when
+`isConnectAttempted(kv)` (early, to skip provider work, and again where the live credential is
+written), then mark it in that same synchronous section:
+
+```ts
+if (isConnectAttempted(kv)) return refuse();
+this.#creds.connect(grant);
+markConnectAttempted(kv);
+const handoff = await callback.complete(user, credentialsRefreshabilityExpiry);
+```
 
 RPC rejection does not prove that `complete()` failed. Workshop may already hold a pending handoff,
 or a sign-in may already have linked the account, so a blind rollback can delete credentials the
@@ -541,6 +562,11 @@ provider" warning survives.
 substitutes for a provider idempotency key derived from the stable `ActionContext.id`, which is
 what makes a retry safe in the first place.
 
+`submit` refuses a payload whose `dependsOn` names a reference that is neither resolved nor
+provided by a pending or claimed action: once its provider was rejected or failed, every apply
+would fail retryably, and an auto-approvable one would stall the drain behind it. A provider
+decided while the dependent was being delivered fails it instead, as the cascade would have.
+
 ### Describe with `buildDescription`
 
 Write `describe` with `buildDescription` from `@gadgets/gatekeeper-kit/action-description`. The
@@ -733,7 +759,7 @@ is over, or the caller should ask again. The `collections` branch above also ass
 `trackedCollectionObservers`; under a strategy whose `aclChecks` is `"unsupported"` every branch is
 `baseline`, per the table above.
 
-A refusal holds the outgoing page, so the retry re-offers exactly it with no further provider
+A refusal holds the outgoing page, so the retry re-offers its rows with no further provider
 fetch: a page the provider capped short cannot grow between the refusal and the retry, which would
 hand the approver something larger than what they refused. An empty page from a spent window is the
 exception — nothing was disclosed, so the retry opens a fresh window rather than pinning the walk
@@ -758,6 +784,23 @@ return new TokenCursor<Project>({
   // …
 });
 ```
+
+### Merge simulated rows with `inject`
+
+Rows the gatekeeper's own simulation adds to a listing — a branch a queued push will create, a
+commit queued for push — go in `inject: { items, compare, revalidate?, identity? }` rather than a
+wrapper cursor, so they share the walk's serialization, fetch bound and refusal hold. Each injected
+row is served before the first provider row `compare` places it at-or-before, and the rest after the
+last page. They are not provider rows: they never reach `authorizePage`'s `items`, and a page
+made only of them is not authorized, so do not inject anything the provider supplied. Their
+position still says a little — an injected row served first means no fetched provider row sorts
+ahead of it — so a listing whose order is itself sensitive authorizes its observation up front.
+`revalidate` re-reads a row when it is served (`null` drops it), since a page may be drained long
+after the cursor was built. `identity` drops a later row of either source whose identity was
+already served, such as the provider's copy of a create that landed mid-walk; an injected row's
+identity is re-read at each check, so a temporary id that became the provider's still matches.
+A refused page's retry re-reads its injected rows and offers no provider row the refusal did not
+cover; one a dropped injected row had hidden leads the next page instead, with the rows after it.
 
 ### Refusal and failure have different outcomes
 
@@ -789,6 +832,7 @@ The kit supplies defaults where they apply across consumers:
 | `maxTrackedCollections` | 1000 |
 | `maxObservers` | 10 |
 | `remotePageSize` | 100 |
+| cursor `maxProviderPagesPerCall` | 10 |
 | `OAuthClient` `timeoutMs` | 30 000 ms |
 | `OAuthClient` `maxResponseBytes` | 64 KiB |
 
@@ -802,7 +846,65 @@ bounds the distinct collections this binding has *ever* disclosed, including mar
 left behind, so size it from the whole resource rather than one page — a per-page value starts
 refusing valid reads once later pages reveal new collections. `maxObservers` must account for the Workers
 subrequest ceiling because every observer costs a verifier call on each read. `remotePageSize`
-cannot exceed the provider's page cap.
+cannot exceed the provider's page cap. Lower `maxProviderPagesPerCall` for a provider that bills
+each row it returns: a filter that drops whole pages otherwise pays for up to ten per `next()`, and
+`1` with a `pageSize` no provider page exceeds makes each `next()` one provider request.
+
+## Git
+
+`git-transport`, `git-objects`, and `git-diff` implement the worktree contract in
+`plans/worktrees.md` §3 for any smart-HTTP host. The gatekeeper supplies a fetch callback that adds
+the URL, credentials, and timeouts; the kit owns the framing. Two rules of DO cache-pull framing are easy to
+break from the outside and fail late when broken:
+
+- **Never send a `have`.** A `have` asserts full reachability of that commit, but the workspace
+  cache can hold commits from filtered or shallow pulls whose blobs or ancestors it lacks.
+  Sending one makes upload-pack withhold objects a later fault will `want`. `buildGitFetchRequest`
+  sends an empty have list and `done`; do not build a fetch request another way to "save bytes".
+- **At most one `filter` line.** upload-pack accepts a single filter-spec — a second `filter` line
+  is not merged, and GitHub rejects the request outright. Combining hints is spelled in the
+  filter-spec grammar or not at all; `filterSpecForHints` is the one place that chooses, and its
+  limits are documented on it (`blob:limit` and `tree:0` are known to work on GitHub; `combine:`
+  is not).
+
+Every ref update goes through `pushGitRefUpdate` with the *queue-time* old sha, so receive-pack's
+compare-and-swap protects a branch that moved between approval and apply; a rejected update is a
+`GitRefUpdateRejectedError` whose `reason` is the server's own line, which the gatekeeper passes
+through rather than matching on. Advertise every commit id a read hands out — `advertiseCommits`
+for a single read, and for a listing a `PageHookCursor` whose hook is `advertisePages` — except
+those served from the cache while queued for push, which both take as `withhold`: advertising one
+of those would record a pull-routing hint for an object the remote does not have. A session's
+`SessionGitCache` (`./cursors`) does both over its own lazily fetched cache stub, with `withhold`
+given once at construction.
+
+A simulated read of a branch with queued pushes takes its head from `simulateBranchHead(realHead,
+pushes)`, the gatekeeper filtering the pushes to that branch; the same call gives the next push its
+`expectedOldSha`, so the simulated head and the compare-and-swap agree. Provider patches go through
+`parseUnifiedPatch`, one file's patch at a time, which shares `diffTextLines`'s hunk shape, so a
+simulated diff and a provider diff read alike.
+
+Lazy DO reads use `Gatekeeper.gitPull(oids, options)`. This is a kernel-facing method, not part
+of a gadget's session API. The kernel routes pulls through recorded object provenance
+(advertised commits, their referents, or objects previously populated by that gatekeeper).
+The shared composer checks oid syntax and composes typed options; it does not check
+advertisement history.
+The provider composes a typed fetch with `git-pull-transfer.startGitPull()` and returns a transfer
+capability. Claim its backpressured raw PACK stream once with `stream()`, without buffering or
+base64 encoding. The DO feeds it to its bounded cache decoder. Workers RPC can replace a stream
+exception with a generic disconnect. If consuming the stream fails, query `status()` to recover
+the producer's error; if the status has not failed, preserve the consumer's own error. After
+draining the stream, require `complete` before accepting the transfer. Cancel an unfinished stream
+and dispose the capability when done.
+
+The transfer also supports a native container consumer, but container hydration is not enabled
+by this capability alone; it requires the separate kernel worktree-replica bootstrap support.
+That consumer must bind its bootstrap capability to an authorized immutable commit, request depth
+one with no tree/blob filters, stream directly to native Git using its own limits rather than
+the DO cache's, and close the bootstrap capability after hydration. No guest-supplied Git
+commands, ref discovery, arbitrary URLs, or provider credentials belong in that bootstrap
+interface. Packs are self-contained (no `have` negotiation or thin-pack dependencies). Native
+consumers must record their shallow boundary because the raw pack does not carry Git protocol
+shallow-info.
 
 ## Other module boundaries
 
@@ -811,12 +913,21 @@ cannot exceed the provider's page cap.
 - Use `isNoAccessError` or `probeAccess` for observer ACL checks. Do not use `isNoAccessError` as
   `CredentialSource.isAuthError`; it accepts 403 and 404.
 - Use `readTextCapped` for every textual, JSON, or error body — a provider can return more bytes
-  than the Worker can hold. It decodes UTF-8 and buffers, so binary downloads and streaming
-  protocols (SSE, Git) need their own byte-preserving limit instead.
+  than the Worker can hold — and for a connect form read before its nonce is checked. It decodes
+  UTF-8 and buffers, so binary downloads and streaming protocols (SSE, Git) need their own
+  byte-preserving limit instead. The exception is an excerpt decorating an error already being
+  raised: `readTextPrefix(response, n)` truncates instead of refusing and never throws on the body,
+  so an oversized HTML error page still yields its first bytes. Never redact its result: the cut can
+  split an echoed secret. Read a body that may echo a credential whole with `readTextCapped` and
+  redact before cutting. Use `readTextCapped` whenever the whole body must be read, JSON included.
 - Use `normalizeVendorEndpoint` for user-supplied provider base URLs. It validates that one URL and
   is not a fetch policy: fetch with `redirect: "manual"`, or re-validate each `Location` and drop
   origin-scoped headers when the origin changes, or a redirect carries `Authorization` off the
   allowlisted host.
+- Put agent-supplied ids into request paths with `pathSegment`, or `pathSegments` for a
+  `/`-separated name, not bare `encodeURIComponent`: it leaves `.` and `..` literal, and URL
+  parsing resolves them out of the route prefix. The provider's id grammar is still the
+  gatekeeper's to check.
 - Use `PreviewOAuth` when previews must share one stable callback registered with the OAuth
   provider.
 - Use `OAuthClient` for OAuth 2.0 token-endpoint calls rather than a hand-written `fetch`. It is

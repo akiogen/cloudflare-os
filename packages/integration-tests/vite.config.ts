@@ -8,13 +8,25 @@ import {
 export default {
   run: {
     tasks: {
-      /** Builds the fixture and orders both validated Workers before test files start. */
+      /** Builds the fixture and orders every validated Worker global setup requires. */
       'build:test-gatekeeper': {
         command: withTestTimeout(
           'capnweb-validate build --cwd fixtures/gatekeeper-test --out .wrangler/validate',
         ),
         cache: false,
-        dependsOn: ['@gadgets/workshop-backend#build:integration-worker'],
+        dependsOn: [
+          '@gadgets/workshop-backend#build:integration-worker',
+          '@gadgets/gatekeeper-context#build:integration-worker',
+        ],
+      },
+      /**
+       * gatekeeper-google as the release before the hook delivery queue moved, for the suite that
+       * upgrades it in place (`scripts/build-upgrade-base.ts`). Uncached: the script reads git and
+       * the pnpm store, which no fingerprint covers, and returns at once when its output is current.
+       */
+      'build:upgrade-base': {
+        command: withTestTimeout('node scripts/build-upgrade-base.ts'),
+        cache: false,
       },
       /**
        * BLOS: prebuilds gatekeeper-email for blos-inquiry-gadget.test.ts, which boots it with its
@@ -24,6 +36,8 @@ export default {
         command: withTestTimeout(
           'capnweb-validate build --cwd ../gatekeeper-email --out .wrangler/validate',
         ),
+        // The configurator UI (src/generated/*.txt) that gatekeeper-email imports.
+        dependsOn: ['@gadgets/email-gatekeeper#build:configurator'],
         cache: false,
       },
       /**
@@ -48,7 +62,14 @@ export default {
           ...VITEST_TOOL_SCRATCH_EXCLUSIONS,
           ...WRANGLER_RUNTIME_SCRATCH_EXCLUSIONS,
         ]),
-        dependsOn: ['build:test-gatekeeper', 'build:blos-email-gatekeeper'],
+        // Real gatekeepers boot from prebuilt validated trees, tracked as inputs like the fixture,
+        // plus the release the Google upgrade suite starts from.
+        dependsOn: [
+          'build:test-gatekeeper', 'build:upgrade-base', 'build:blos-email-gatekeeper',
+          '@gadgets/github-gatekeeper#build:integration-worker',
+          '@gadgets/google-gatekeeper#build:integration-worker',
+          '@gadgets/gatekeeper-context#build:integration-worker',
+        ],
       },
     },
   },

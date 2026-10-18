@@ -61,6 +61,8 @@ export type DocList = {
 export type NestingLevel = {
   /** If set, this is an ordered (numbered) list level. Values: "DECIMAL", "ALPHA", etc. */
   glyphType?: string;
+  /** Number assigned to the first item at this level. */
+  startNumber?: number;
   /** If set, this is an unordered (bullet) list level. e.g. "●" */
   glyphSymbol?: string;
 }
@@ -71,8 +73,34 @@ export type StructuralElement = {
   endIndex: number;
   paragraph?: Paragraph;
   sectionBreak?: {};
-  table?: {};
+  table?: Table;
   tableOfContents?: {};
+}
+
+// The collections in the table types below are optional: the API omits an empty one from its
+// JSON rather than sending `[]`.
+
+/** A table embedded in a document body or table cell. */
+export type Table = {
+  tableRows?: TableRow[];
+}
+
+/** One row in a Google Docs table. */
+export type TableRow = {
+  startIndex: number;
+  endIndex: number;
+  tableCells?: TableCell[];
+}
+
+/** One table cell, whose contents use the same recursive structure as the document body. */
+export type TableCell = {
+  startIndex: number;
+  endIndex: number;
+  content?: StructuralElement[];
+  tableCellStyle?: {
+    rowSpan?: number;
+    columnSpan?: number;
+  };
 }
 
 /** A paragraph (including headings, list items, etc.). */
@@ -80,6 +108,8 @@ export type Paragraph = {
   elements: ParagraphElement[];
   paragraphStyle: ParagraphStyle;
   bullet?: Bullet;
+  /** Positioned objects tethered to this paragraph. */
+  positionedObjectIds?: string[];
 }
 
 export type ParagraphStyle = {
@@ -89,15 +119,36 @@ export type ParagraphStyle = {
 /** Present on paragraphs that are list items. */
 export type Bullet = {
   listId: string;
-  nestingLevel: number;
+  nestingLevel?: number;
 }
 
-/** An element within a paragraph (text run, horizontal rule, etc.). */
+/** An element within a paragraph (text run, smart chip, horizontal rule, etc.). */
 export type ParagraphElement = {
   startIndex: number;
   endIndex: number;
   textRun?: TextRun;
+  autoText?: {
+    type?: string;
+    textStyle?: TextStyle;
+  };
   horizontalRule?: {};
+  pageBreak?: { textStyle?: TextStyle };
+  columnBreak?: { textStyle?: TextStyle };
+  footnoteReference?: { footnoteId?: string; footnoteNumber?: string; textStyle?: TextStyle };
+  equation?: {};
+  inlineObjectElement?: { inlineObjectId?: string; textStyle?: TextStyle };
+  person?: {
+    textStyle?: TextStyle;
+    personProperties?: { name?: string; email?: string };
+  };
+  richLink?: {
+    textStyle?: TextStyle;
+    richLinkProperties?: { title?: string; uri?: string };
+  };
+  dateElement?: {
+    textStyle?: TextStyle;
+    dateElementProperties?: { displayText?: string };
+  };
 }
 
 export type TextRun = {
@@ -105,11 +156,19 @@ export type TextRun = {
   textStyle: TextStyle;
 }
 
+type GoogleDocsLink =
+  | { url: string }
+  | { tabId: string }
+  | { bookmark: { id: string; tabId: string } }
+  | { heading: { id: string; tabId: string } }
+  | { bookmarkId: string }
+  | { headingId: string };
+
 export type TextStyle = {
   bold?: boolean;
   italic?: boolean;
   strikethrough?: boolean;
-  link?: { url: string };
+  link?: GoogleDocsLink;
 }
 
 type GoogleDocsResponse = Pick<
@@ -210,6 +269,23 @@ export class GoogleDocsApi {
     return readGoogleJson<T>(response, {
       provider: "Google Docs", operation, maxBytes: MAX_RESPONSE_BYTES,
     });
+  }
+
+  /** Create an empty document titled `title` in the caller's My Drive, returning its ID. */
+  async createDocument(title: string): Promise<string> {
+    let { documentId } = await this.#request<{ documentId?: unknown }>(
+      `${DOCS_API_BASE}?fields=documentId`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      },
+      "create document",
+    );
+    if (typeof documentId !== "string" || documentId.length === 0) {
+      throw new Error("Google Docs returned no document ID");
+    }
+    return documentId;
   }
 
   /** Fetch a document and flatten its tab tree. */
@@ -324,5 +400,57 @@ export class GoogleDocsApi {
       },
       "delete named range",
     );
+  }
+}
+
+/** The reads a Google Doc session makes. */
+export type GoogleDocReader = Pick<GoogleDocsApi, "getDocument" | "getDocumentMetadata" | "getRevisionId">;
+
+/** The tab ID Google gives a new document's only tab, and so the blank stand-in's. */
+export const BLANK_DOC_TAB_ID = "t.0";
+
+/** Revision of the blank stand-in, which never changes. */
+const BLANK_DOC_REVISION = "blank";
+
+/**
+ * A document not yet created, read as Google returns a new one: one tab holding one empty
+ * paragraph. Makes no request.
+ */
+export class BlankGoogleDoc implements GoogleDocReader {
+  constructor(private title: string) {}
+
+  async getDocument(documentId: string): Promise<GoogleDocsDocument> {
+    let tab: GoogleDocsTab = {
+      tabId: BLANK_DOC_TAB_ID,
+      title: "Tab 1",
+      index: 0,
+      nestingLevel: 0,
+      lists: {},
+      namedRanges: {},
+      body: {
+        content: [
+          { startIndex: 0, endIndex: 1, sectionBreak: {} },
+          {
+            startIndex: 1,
+            endIndex: 2,
+            paragraph: {
+              elements: [{ startIndex: 1, endIndex: 2, textRun: { content: "\n", textStyle: {} } }],
+              paragraphStyle: { namedStyleType: "NORMAL_TEXT" },
+            },
+          },
+        ],
+      },
+    };
+    return { documentId, title: this.title, revisionId: BLANK_DOC_REVISION, tabs: [tab] };
+  }
+
+  async getDocumentMetadata(
+    documentId: string,
+  ): Promise<Pick<GoogleDocsDocument, "documentId" | "title" | "revisionId">> {
+    return { documentId, title: this.title, revisionId: BLANK_DOC_REVISION };
+  }
+
+  async getRevisionId(): Promise<string | undefined> {
+    return BLANK_DOC_REVISION;
   }
 }

@@ -41,6 +41,17 @@ function auxiliaryCompletion(body: unknown): AuxiliaryCompletion | undefined {
       completion => parsed.data.messages[0].content.startsWith(completion.promptPrefix));
 }
 
+const SYSTEM_PROMPT_REQUEST = z.object({
+  messages: z.array(z.object({ role: z.string(), content: z.unknown() })),
+});
+
+/** The system prompt of one recorded agent request. */
+export function systemPromptOf(request: unknown): string {
+  const system = SYSTEM_PROMPT_REQUEST.parse(request).messages.find(m => m.role === "system");
+  if (typeof system?.content !== "string") throw new Error("The request has no system prompt");
+  return system.content;
+}
+
 export const SCRIPTED_MODEL_ID = "@cf/zai-org/glm-5.2";
 export const SCRIPTED_MODEL_PROFILE: AiChatAuthorInfo = {
   type: "agent",
@@ -60,8 +71,10 @@ type ToolCall = {
   arguments: Record<string, unknown>;
 };
 
-// One model response: text, or one or more tool calls the agent runs in that step.
-type StreamedCompletionStep = { text: string } | { toolCall: ToolCall } | { toolCalls: ToolCall[] };
+// One model response: text, or one or more tool calls the agent runs in that step, with optional
+// token usage (pi sums prompt and completion tokens; it ignores `total_tokens`).
+type StreamedCompletionStep = ({ text: string } | { toolCall: ToolCall } | { toolCalls: ToolCall[] }) &
+  { usage?: typeof USAGE };
 export type ChatCompletionStep = StreamedCompletionStep |
   { error: { status: number; message: string } } |
   { pending: true };
@@ -103,7 +116,7 @@ function stream(step: StreamedCompletionStep, index: number): Response {
   }) + event({
     ...base,
     choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-    usage: USAGE,
+    usage: step.usage ?? USAGE,
   }) + "data: [DONE]\n\n";
   return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
@@ -145,6 +158,38 @@ export function scriptedChatCompletions(script: readonly ChatCompletionStep[])
         return new Response(step.error.message, { status: step.error.status });
       }
       return stream(step, responseIndex++);
+    },
+  };
+}
+
+const WORKERS_AI_CHAT_COMPLETIONS = /\/accounts\/([^/]+)\/ai\/v1\/chat\/completions$/;
+let routedAccountSeq = 0;
+
+/** One test's script, answering only requests made with its `userModel`. */
+export type RoutedScriptedModel = Omit<ScriptedChatCompletions, "handler"> & {
+  userModel: { profile: AiChatAuthorInfo; config: AiModelConfig };
+};
+
+/**
+ * Routes model requests to per-test scripts by Workers AI account id, so concurrent tests sharing
+ * one NetworkInterceptor each consume only their own queue. Unknown accounts are declined.
+ */
+export function scriptedModelRouter(): {
+  handler: Handler;
+  script(steps: readonly ChatCompletionStep[]): RoutedScriptedModel;
+} {
+  const routes = new Map<string, Handler>();
+  return {
+    handler: (url, ...rest) =>
+      routes.get(WORKERS_AI_CHAT_COMPLETIONS.exec(url.pathname)?.[1] ?? "")?.(url, ...rest) ?? null,
+    script(steps) {
+      const accountId = `scripted-account-${++routedAccountSeq}`;
+      const { handler, ...model } = scriptedChatCompletions(steps);
+      routes.set(accountId, handler);
+      return {
+        ...model,
+        userModel: { profile: SCRIPTED_MODEL_PROFILE, config: { ...SCRIPTED_MODEL_CONFIG, accountId } },
+      };
     },
   };
 }

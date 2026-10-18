@@ -26,10 +26,11 @@ through logs and errors, then everything else.
 
 - A resource becomes "ambient" (auto-injected) only through user or admin configuration. A
   gatekeeper must never assert its own ambience.
-- `getGatekeeperClassFor()` in `packages/workshop-backend/src/user.ts` (not the same-named vendor
-  method each gatekeeper implements) is the single chokepoint where disabled gatekeepers and
-  resources are enforced before a capability is minted. Flag any new path that mints a gatekeeper
-  capability without going through it.
+- `#assertResourceEnabled()` in `packages/workshop-backend/src/user.ts` is the single chokepoint
+  where disabled gatekeepers and resources are enforced before a capability is minted, called by
+  both of that file's mints: `getGatekeeperClassFor()` (not the same-named vendor method each
+  gatekeeper implements) and `createResourceGatekeeper()`. Flag any new path that mints a
+  gatekeeper capability without going through it.
 - Authentication and authorization config (`AUTH_GATEKEEPERS`, `DISABLE_PASSWORD_AUTH`) is
   deliberately env-var driven in `auth/config.ts` and must **not** move into `AdminConfig`, so a
   compromised admin session cannot change it. Reject changes that relocate it.
@@ -42,9 +43,17 @@ through logs and errors, then everything else.
 - `packages/bundled-blueprints/blueprints/`: a `blueprintId` is never edited after deploy — installs and promotion are
   keyed on it, so a rename orphans the old entry.
 
+## Gatekeepers
+
+Correctness is not enough. Pressure-test the agent-facing API
+(`packages/gatekeeper-*/src/*types.d.ts`): does the shape make sense, does it cover the most common
+user stories, what would you do differently? Check that the seams (resource granularities, bindings,
+sessions) partition authority along the lines users actually grant. The checklist is "Reviewing a
+gatekeeper" in `.agents/skills/write-gatekeeper/SKILL.md`.
+
 ## Logging, errors and secrets
 
-- Server code logs through `@gadgets/backend-utils/logger` with a module-scoped logger and a stable
+- Server code logs through `@gadgets/observability/logger` with a module-scoped logger and a stable
   dot-separated `component` (plus `vendorId` for gatekeepers). Caught values are passed as `error`.
 - Never log or report secrets, prompts, headers, tokens, or request/response bodies. Exception
   messages and stacks reach the external Reporter, so the same rule applies to anything thrown or

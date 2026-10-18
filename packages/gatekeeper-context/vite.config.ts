@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite-plus'
-import { vitestTask } from '@gadgets/scripts/vitest-task'
+import { TESTS_WITH_TIMEOUT_ENV, vitestTask, withTestTimeout } from '@gadgets/scripts/vitest-task'
 
 /**
  * Vite+ settings for this package. The SPA's own build config lives in `vite.app.config.ts`;
@@ -11,6 +11,16 @@ export default defineConfig({
       // Shared by every package whose tests run under vitest; see the module for why the two
       // vitest scratch paths have to be excluded for this to cache at all.
       test: vitestTask(['vitest run', 'vitest run -c vitest.node.config.ts']),
+      // The integration harness boots this validated tree without rebuilding it per test file.
+      'build:integration-worker': {
+        command: withTestTimeout('capnweb-validate build --out .wrangler/validate'),
+        dependsOn: ['build:app'],
+        cache: {
+          env: TESTS_WITH_TIMEOUT_ENV,
+          input: [{ auto: true }, { pattern: '!**/.wrangler/**', base: 'workspace' }],
+          output: ['.wrangler/validate/**'],
+        },
+      },
       // Uncached: a cache hit restores archived outputs but never deletes files, so the sourcemap
       // artifacts of an enabled-reporting build (dist-app/gatekeeper-context.js + .js.map) would
       // survive a later disabled-reporting cache hit and could be collected as if they matched the
@@ -19,8 +29,8 @@ export default defineConfig({
         command: 'gadgets-clean-error-reporting .',
         cache: false,
       },
-      // A task rather than a package.json script so `input` can be stated explicitly: automatic
-      // tracking treats the whole package as input, and this build writes `dist-app/` and
+      // A task rather than a package.json script so `cache.input` can be stated explicitly:
+      // automatic tracking treats the whole package as input, and this build writes `dist-app/` and
       // `src/generated/app.txt` back into it, so nothing ever cached.
       //
       // The exclusions have to be workspace-wide, not package-relative -- tracking reaches past the
@@ -30,18 +40,20 @@ export default defineConfig({
       'build:app': {
         command: 'node build-app.ts',
         dependsOn: ['clean:error-reporting-artifacts'],
-        input: [
-          { auto: true },
-          { pattern: '!**/dist-app/**', base: 'workspace' },
-          { pattern: '!**/src/generated/**', base: 'workspace' },
-          // Wrangler's scratch bundles are randomly named, so without this a `pnpm dev-server` run
-          // guarantees a miss on the next one.
-          { pattern: '!**/.wrangler/**', base: 'workspace' },
-        ],
-        output: ['dist-app/**', 'src/generated/app.txt'],
-        // Read via `loadEnv` in vite.app.config.ts and baked into the bundle, so it belongs in the
-        // fingerprint.
-        env: ['VITE_FRONTEND_ERROR_REPORTING'],
+        cache: {
+          input: [
+            { auto: true },
+            { pattern: '!**/dist-app/**', base: 'workspace' },
+            { pattern: '!**/src/generated/**', base: 'workspace' },
+            // Wrangler's scratch bundles are randomly named, so without this a `pnpm dev-server`
+            // run guarantees a miss on the next one.
+            { pattern: '!**/.wrangler/**', base: 'workspace' },
+          ],
+          output: ['dist-app/**', 'src/generated/app.txt'],
+          // Read via `loadEnv` in vite.app.config.ts and baked into the bundle, so it belongs in
+          // the fingerprint.
+          env: ['VITE_FRONTEND_ERROR_REPORTING'],
+        },
       },
       // The same build unminified, run by the `pnpm dev-server` pre-flight. The app watcher cannot
       // skip its own initial build, so the pre-flight's output is rebuilt regardless; matching the
@@ -54,14 +66,16 @@ export default defineConfig({
       'build:app:dev': {
         command: 'node build-app.ts --dev',
         dependsOn: ['clean:error-reporting-artifacts'],
-        input: [
-          { auto: true },
-          { pattern: '!**/dist-app/**', base: 'workspace' },
-          { pattern: '!**/src/generated/**', base: 'workspace' },
-          { pattern: '!**/.wrangler/**', base: 'workspace' },
-        ],
-        output: ['src/generated/app.txt'],
-        env: ['VITE_FRONTEND_ERROR_REPORTING'],
+        cache: {
+          input: [
+            { auto: true },
+            { pattern: '!**/dist-app/**', base: 'workspace' },
+            { pattern: '!**/src/generated/**', base: 'workspace' },
+            { pattern: '!**/.wrangler/**', base: 'workspace' },
+          ],
+          output: ['src/generated/app.txt'],
+          env: ['VITE_FRONTEND_ERROR_REPORTING'],
+        },
       },
     },
   },

@@ -1,16 +1,22 @@
-import { createObservabilityContext } from "@gadgets/backend-utils/observability-context";
-import { createTracer } from "@gadgets/backend-utils/tracing";
+import { createObservabilityContext } from "@gadgets/observability/observability-context";
 
 /** Observability fields emitted by the Workshop backend. */
 export type WorkshopObservabilityFields = {
   accountId: number;
   actionId: number | string;
+  agentName: string;
   autoProvisioned: boolean;
   blueprintId: string;
   callbackInitiated: boolean;
   chatId: number;
+  changeStage: "buffer" | "persist";
+  changeIndex: number;
+  changeWorkpieceCount: number;
+  changeFileCount: number;
+  changeEmptyPathCount: number;
   claimedType: string;
   commitCount: number;
+  credentialKind: "workshop" | "cloudflare-access";
   durableObjectId: string;
   durationMs: number;
   eventName: string;
@@ -47,6 +53,3 @@ export const obsContext = createObservabilityContext<WorkshopObservabilityFields
 export function createWorkshopLogger(component: string) {
   return obsContext.createLogger({ component });
 }
-
-/** Runs `callback` in a trace span carrying the ambient observability fields as attributes. */
-export const traced = createTracer(obsContext.get);
