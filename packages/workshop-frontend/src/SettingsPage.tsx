@@ -10,6 +10,7 @@ import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
 import { useDocumentTitle } from './useDocumentTitle'
 import { isImeComposing } from './keyboardEvent'
+import { emailOfAccount } from "@gadgets/workshop-shared/team-policy";
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
@@ -474,7 +475,7 @@ export default function SettingsPage() {
               <div className="min-w-0 flex-1">
                 <FieldLabel>User ID</FieldLabel>
                 <p className="mt-1 truncate font-mono text-[12px] tracking-[-0.1px] text-kumo-subtle">
-                  {userInfo?.id}
+                  {userInfo && emailOfAccount(userInfo.id)}
                 </p>
               </div>
               <button

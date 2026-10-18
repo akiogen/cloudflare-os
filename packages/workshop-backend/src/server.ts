@@ -33,6 +33,7 @@ import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import { getTeamPolicy, userDirectoryName } from "./team-policy.js";
+import { emailOfAccount } from "@gadgets/workshop-shared/team-policy";
 import { deviceSessionCallback } from "./auth/device-session-callback.js";
 
 const logger = createWorkshopLogger("workshop.server");
@@ -138,7 +139,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       throw new TypeError("ADMINS must be configured as an array of usernames.");
     }
 
-    return admins.includes(name);
+    // Operators are listed by email; an account name carries a Team part (BLOS ADR-0015).
+    return admins.includes(emailOfAccount(name));
   }
 
   whoami(): Promise<AiChatAuthorInfo> {
@@ -682,6 +684,20 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return selector.createGatekeeperUserSelection(app.accountId, selectedUserId);
   }
 
+  // --- Teams (BLOS ADR-0015 Decision 4) ---
+
+  async switchTeam(teamId: string): Promise<string | null> {
+    let current = this.#userId.name;
+    if (!current) return null;
+    let policy = getTeamPolicy(this.env);
+    let target = await policy.switchAccount(current, teamId);
+    if (target === null || !(await policy.allowSignIn(target))) return null;
+    // The policy vouched for the membership, so the account is created if this is its first use.
+    let secret = await this.users.get(this.users.idFromName(target))
+        .loginOrCreateViaGatekeeper(target, true);
+    return secret === null ? null : `${target}:${secret}`;
+  }
+
   // --- Deployment admin ---
 
   async amIAdmin(): Promise<boolean> {
@@ -818,14 +834,17 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     }
 
     let email = this.accessSession.payload.email as string;
-    // A departed member is refused before the account is touched (BLOS ADR-0012 P8).
-    if (!(await getTeamPolicy(this.env).allowSignIn(email))) {
+    // The Team policy names the account (BLOS ADR-0015 Decision 3); a departed member is refused
+    // before the account is touched (BLOS ADR-0012 P8).
+    let policy = getTeamPolicy(this.env);
+    let accountId = await policy.signInAccount(email);
+    if (accountId === null || !(await policy.allowSignIn(accountId))) {
       throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
     }
-    let userId = this.users.idFromName(email);
+    let userId = this.users.idFromName(accountId);
     let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
     let accountCreated =
-        await this.users.get(userId).authenticateFromCfAccess(email, signupsEnabled);
+        await this.users.get(userId).authenticateFromCfAccess(accountId, signupsEnabled);
     if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
@@ -947,7 +966,15 @@ export default {
             headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" },
           });
         }
-        expectedUserDoId = ctx.exports.UserDurableObject.idFromName(payload.email).toString();
+        // The account Access sign-in would use, as the Team policy names it (BLOS ADR-0015).
+        const accountId = await getTeamPolicy(env).signInAccount(payload.email);
+        if (accountId === null) {
+          return new Response("This account can't sign in to this deployment.", {
+            status: 403,
+            headers: { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" },
+          });
+        }
+        expectedUserDoId = ctx.exports.UserDurableObject.idFromName(accountId).toString();
       }
       return deviceSessionCallback(req, async (userDoId, state, ticket) => {
         let id: DurableObjectId;

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SINGLE_TEAM_ID,
   SINGLE_TEAM_POLICY,
+  emailOfAccount,
   type TeamPolicy,
 } from "@gadgets/workshop-shared/team-policy";
 import { getTeamPolicy, userDirectoryName } from "../src/team-policy.js";
@@ -48,5 +49,21 @@ describe("userDirectoryName", () => {
   it("gives every other Team its own directory", () => {
     expect(userDirectoryName("team-a")).toBe("team:team-a");
     expect(userDirectoryName("team-b")).not.toBe(userDirectoryName("team-a"));
+  });
+});
+
+// BLOS ADR-0015: one account per Team membership, named `<email>#<team>`.
+describe("accounts per Team membership", () => {
+  it("recovers the email from an account name", () => {
+    expect(emailOfAccount("alice@example.com#team-a")).toBe("alice@example.com");
+    expect(emailOfAccount("alice@example.com")).toBe("alice@example.com");
+    expect(emailOfAccount("bob")).toBe("bob");
+  });
+
+  it("keeps the bare name and allows no switch without a bound policy", async () => {
+    await expect(SINGLE_TEAM_POLICY.signInAccount("alice@example.com")).resolves.toBe("alice@example.com");
+    await expect(SINGLE_TEAM_POLICY.accountInTeamOf("bob", "alice@example.com"))
+        .resolves.toBe("alice@example.com");
+    await expect(SINGLE_TEAM_POLICY.switchAccount("alice@example.com", "team-a")).resolves.toBeNull();
   });
 });

@@ -10295,17 +10295,22 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       return { accepted: false, message: "Please include a prompt." };
     }
 
-    // Resolve the caller.
-    let caller = this.impl.users.getByName(input.callerEmail);
-    let callerId = caller.id.toString();
-    let callerProfile = await caller.whoamiIfExists();
-    if (!callerProfile) {
+    // Resolve the caller: their account in the Gadget owner's Team, or for a new Gadget the account
+    // they sign in to (BLOS ADR-0015 Decision 8). None gets the no-account answer below.
+    let policy = getTeamPolicy(this.impl.env);
+    let callerAccount = this.impl.ownerId
+        ? await policy.accountInTeamOf(await this.impl.getOwnerProfileId(), input.callerEmail)
+        : await policy.signInAccount(input.callerEmail);
+    let caller = callerAccount === null ? null : this.impl.users.getByName(callerAccount);
+    let callerProfile = caller ? await caller.whoamiIfExists() : null;
+    if (!caller || !callerProfile) {
       let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
       return {
         accepted: false,
         message: `Please create a ${siteName} account to continue.`,
       };
     }
+    let callerId = caller.id.toString();
 
     // Create the Gadget if it doesn't exist yet.
     let ownerId = this.impl.ownerId;
@@ -12357,8 +12362,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
+    // The typed name means that person's account in the owner's Team (BLOS ADR-0015 Decision 8);
+    // none there gets the same `null` as a missing account.
+    const accountId = await getTeamPolicy(this.impl.env)
+        .accountInTeamOf(await this.impl.getOwnerProfileId(), username);
+    if (accountId === null) return null;
     // Look up the user DO to check if the account exists.
-    let userDoId = this.impl.users.idFromName(username);
+    let userDoId = this.impl.users.idFromName(accountId);
     let userDo = this.impl.users.get(userDoId);
     let profile = await userDo.whoamiIfExists();
     if (!profile) {

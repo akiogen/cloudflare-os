@@ -7,7 +7,8 @@ import type { WorkerEntrypoint } from "cloudflare:workers";
  * exactly as it does for a single organization.
  *
  * `userId` is the Workshop's account key: the verified email, or the username on password
- * deployments.
+ * deployments. A policy that lets one person belong to several Teams (BLOS ADR-0015) gives each
+ * membership its own account, named `<email>#<teamId>`; `emailOfAccount` recovers the email.
  */
 export interface TeamPolicy {
   /** The Team `userId` belongs to. */
@@ -36,6 +37,32 @@ export interface TeamPolicy {
    * `null` otherwise (ADR-0012 P9).
    */
   teamMembers(userId: string): Promise<string[] | null>;
+  /**
+   * The account a person signing in with the verified `email` uses, or `null` to refuse the
+   * sign-in. Called on every sign-in path before the account is touched (BLOS ADR-0015 Decision 3).
+   * It creates nothing: a new account's Team is created by `onUserCreated`.
+   */
+  signInAccount(email: string): Promise<string | null>;
+  /**
+   * The account of the person `email` in the Team of `callerId`, or `null` when they have none
+   * there. Every lookup of an account by an email someone typed or received goes through it, so it
+   * never reaches another Team (BLOS ADR-0015 Decision 8).
+   */
+  accountInTeamOf(callerId: string, email: string): Promise<string | null>;
+  /**
+   * The account of `userId`'s person in Team `teamId`, when they may switch to it; `null` otherwise
+   * (BLOS ADR-0015 Decision 4).
+   */
+  switchAccount(userId: string, teamId: string): Promise<string | null>;
+}
+
+/** Separates a person's email from the Team in an account name (BLOS ADR-0015 Decision 2). */
+export const ACCOUNT_TEAM_SEPARATOR = "#";
+
+/** The email (or username) of an account: the account name without its Team part. */
+export function emailOfAccount(accountId: string): string {
+  const at = accountId.indexOf(ACCOUNT_TEAM_SEPARATOR);
+  return at < 0 ? accountId : accountId.slice(0, at);
 }
 
 /** Outcome of `TeamPolicy.authorizeResource`. `message` is shown to the caller as is. */
@@ -57,4 +84,7 @@ export const SINGLE_TEAM_POLICY: TeamPolicy = Object.freeze({
   teamRole: async (_ownerId: string, _userId: string) => null,
   allowSignIn: async (_userId: string) => true,
   teamMembers: async (_userId: string) => null,
+  signInAccount: async (email: string) => email,
+  accountInTeamOf: async (_callerId: string, email: string) => email,
+  switchAccount: async (_userId: string, _teamId: string) => null,
 });

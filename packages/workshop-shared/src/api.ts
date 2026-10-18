@@ -930,6 +930,15 @@ export interface AuthenticatedApi extends RpcTarget {
       vendorId: string, selectedUserId: string,
   ): Promise<GatekeeperUserSelection | null>;
 
+  // --- Teams (BLOS ADR-0015) ---
+
+  /**
+   * A session token for the caller's account in Team `teamId`, created on first use, or null when
+   * the deployment's Team policy does not let the caller switch there. Without a Team policy it is
+   * always null.
+   */
+  switchTeam(teamId: string): Promise<string | null>;
+
   // --- Deployment admin ---
 
   /**
