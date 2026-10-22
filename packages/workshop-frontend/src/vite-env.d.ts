@@ -10,6 +10,8 @@ interface ImportMetaEnv {
   readonly VITE_CF_ACCESS_MODE?: string;
   /** BLOS (business-loop-os ADR-0015): the Team page the profile menus link to. */
   readonly VITE_TEAM_PAGE_URL?: string;
+  /** BLOS (business-loop-os #156): JSON list replacing the Home suggestions. */
+  readonly VITE_HOME_SUGGESTIONS?: string;
 }
 
 interface ImportMeta {

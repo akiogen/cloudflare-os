@@ -7,6 +7,7 @@ import {
   Presentation,
   type Icon,
 } from '@phosphor-icons/react'
+import { configuredHomeSuggestions } from './homeSuggestionsConfig'
 
 // A few example work tasks shown under the Home composer, so a new user immediately sees the kind
 // of thing they can ask for. Picking one drops a starter prompt into the composer (it does not
@@ -105,7 +106,7 @@ function SuggestionRow({
 const VISIBLE_SUGGESTIONS = 3
 
 function pickSuggestions(): TaskSuggestion[] {
-  let shuffled = [...SUGGESTIONS]
+  let shuffled = [...(configuredHomeSuggestions() ?? SUGGESTIONS)]
   for (let i = shuffled.length - 1; i > 0; i--) {
     let j = Math.floor(Math.random() * (i + 1))
     ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
