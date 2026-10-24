@@ -273,13 +273,13 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 
   /** BLOS ADR-0018: erase one account. The avatar lives in KV, outside the user DO. */
   async eraseAccount(account: string, options: EraseAccountOptions): Promise<EraseAccountReport> {
-    let report = await this.users.get(this.users.idFromName(account)).eraseSelf(options);
-    if (report.erased) {
-      try {
-        await this.env.AVATARS.delete(account);
-      } catch {
-        report.failures.push("avatar");
-      }
+    const report = await this.users.get(this.users.idFromName(account)).eraseSelf(options);
+    // Every run, not only the one that erased the account: a retry after a failed avatar delete finds
+    // the account already erased and must still remove the avatar. Deleting a missing key is a no-op.
+    try {
+      await this.env.AVATARS.delete(account);
+    } catch {
+      report.failures.push("avatar");
     }
     return report;
   }
