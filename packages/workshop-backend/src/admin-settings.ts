@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminModel, AdminResourceVendor, AdminSettingsView, AiModelConfig, AiModelProvider, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, GatewayModel, GatewayModelLevelTest, GatewayModelMode, GatewayModelSettings, GatewayModelTest, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, ReasoningLevel, SUGGESTED_MODELS, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { EraseAccountOptions, EraseAccountReport, AdminApi, AdminFormat, AdminFormatPatch, AdminModel, AdminResourceVendor, AdminSettingsView, AiModelConfig, AiModelProvider, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, GatewayModel, GatewayModelLevelTest, GatewayModelMode, GatewayModelSettings, GatewayModelTest, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, ReasoningLevel, SUGGESTED_MODELS, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -269,6 +269,19 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     // Overseer propagation calls this after blueprint updates so the mirror keeps up with the
     // latest published metadata, but only while the owner-side featured bit stays enabled.
     await this.#syncFeaturedMirror(publicInfo, true);
+  }
+
+  /** BLOS ADR-0018: erase one account. The avatar lives in KV, outside the user DO. */
+  async eraseAccount(account: string, options: EraseAccountOptions): Promise<EraseAccountReport> {
+    let report = await this.users.get(this.users.idFromName(account)).eraseSelf(options);
+    if (report.erased) {
+      try {
+        await this.env.AVATARS.delete(account);
+      } catch {
+        report.failures.push("avatar");
+      }
+    }
+    return report;
   }
 
   async deleteFeaturedBlueprint(blueprintId: string): Promise<void> {
@@ -1023,5 +1036,14 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   testNewGatewayModel(model: GatewayModel): Promise<GatewayModelLevelTest[]> {
     return this.admin.testNewGatewayModel(model, this.adminUserId);
+  }
+
+  async eraseAccount(account: string, options: EraseAccountOptions): Promise<EraseAccountReport> {
+    if (typeof account !== "string" || account === "") throw new Error("Account is required.");
+    if (options?.workspaces !== "keep" && options?.workspaces !== "delete") {
+      throw new Error('Workspaces must be "keep" or "delete".');
+    }
+    if (account === this.adminUserId) throw new Error("You can't erase the account you're signed in with.");
+    return this.admin.eraseAccount(account, { workspaces: options.workspaces });
   }
 }

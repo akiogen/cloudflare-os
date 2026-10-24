@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart } from '@gadgets/workshop-shared/api';
+import { EraseAccountOptions, EraseAccountReport, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -2177,6 +2177,88 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     } else {
       await this.ctx.storage.setAlarm(next);
     }
+  }
+
+  /**
+   * BLOS ADR-0018: erase this account for the operator (AdminSettings.eraseAccount). Every step is
+   * attempted; storage is deleted only when none failed, so a retry finds what is left. The avatar
+   * is deleted by the caller.
+   */
+  async eraseSelf(options: EraseAccountOptions): Promise<EraseAccountReport> {
+    let report: EraseAccountReport = {
+      erased: false, workspacesDeleted: 0, workspacesKept: 0, connectionsRevoked: 0,
+      blueprintsDeleted: 0, failures: [],
+    };
+    if (!this.storage.created.get()) return report;
+    report.erased = true;
+    let profile = this.storage.profile.get();
+
+    for (let record of Array.from(this.storage.connectedAccounts.list())) {
+      try {
+        await record.account.revoke();
+        report.connectionsRevoked++;
+      } catch (error) {
+        // A gatekeeper with nothing to revoke must not block erasure; its record goes with storage.
+        logger.warn("revoke() failed during erasure", {
+          event: "account.erase.revoke_failed", vendorId: record.vendorId, error,
+        });
+      }
+    }
+
+    let blueprintIds = new Set<string>();
+    for (let record of this.storage.blueprints.list()) blueprintIds.add(record.id);
+    for (let record of this.storage.libraryBlueprints.list()) {
+      if (record.uploaded) blueprintIds.add(record.id);
+    }
+    for (let id of blueprintIds) {
+      try {
+        await this.deleteOwnedBlueprint(id);
+        report.blueprintsDeleted++;
+      } catch {
+        report.failures.push(`blueprint ${id}`);
+      }
+    }
+
+    // Workspaces shared with this account belong to others and are left alone.
+    let owned = Array.from(this.storage.gadgets.list()).filter(gadget => !gadget.owner);
+    if (options.workspaces === "keep") {
+      report.workspacesKept = owned.length;
+    } else {
+      let overseers = this.ctx.exports.OverseerDurableObject;
+      for (let gadget of owned) {
+        try {
+          let overseer = overseers.get(overseers.idFromString(gadget.id));
+          using session = await overseer.open(this.ctx.id.toString(), profile.id, () => {});
+          await session.deleteSelf();
+          report.workspacesDeleted++;
+        } catch (error) {
+          // A workspace that was registered but never opened has no Overseer state to delete.
+          if (getOpenGadgetErrorCode(error) === OPEN_GADGET_ERROR_CODES.workspaceNotFound) {
+            this.storage.gadgets.delete(gadget.id);
+            report.workspacesDeleted++;
+          } else {
+            report.failures.push(`workspace ${gadget.id}`);
+          }
+        }
+      }
+    }
+
+    try {
+      let team = this.storage.directoryTeam.get();
+      await this.ctx.exports.UserDirectoryDurableObject
+          .getByName(userDirectoryName(team ?? SINGLE_TEAM_ID)).removeUser(profile.id);
+    } catch {
+      report.failures.push("directory");
+    }
+
+    if (report.failures.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+    }
+    logger.info("account erased", {
+      event: "account.erased", failureCount: report.failures.length,
+    });
+    return report;
   }
 
   /**

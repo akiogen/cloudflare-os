@@ -1431,6 +1431,35 @@ export interface AdminApi {
    * eight requests, each of which may use the whole response cap.
    */
   testNewGatewayModel(model: GatewayModel): Promise<GatewayModelLevelTest[]>;
+
+  // --- Erasure (BLOS ADR-0018) ---
+
+  /**
+   * Erase one account (`<email>#<teamId>` with a Team policy, else a username): revoke its
+   * connections, delete the Blueprints it published or uploaded, delete or keep the Workspaces it
+   * owns, remove it from its Team's directory, delete its avatar, then delete all of its storage.
+   * Idempotent: an account that does not exist reports `erased: false`. An admin cannot erase the
+   * account they are signed in with.
+   */
+  eraseAccount(account: string, options: EraseAccountOptions): Promise<EraseAccountReport>;
+}
+
+/** What `AdminApi.eraseAccount` does with the Workspaces the account owns. */
+export interface EraseAccountOptions {
+  /** "keep" leaves them with the Team (departure, BLOS ADR-0015); "delete" deletes them. */
+  workspaces: "keep" | "delete";
+}
+
+/** The outcome of `AdminApi.eraseAccount`. Failures are listed, not thrown, so a retry can finish. */
+export interface EraseAccountReport {
+  /** False when the account did not exist, so nothing was erased. */
+  erased: boolean;
+  workspacesDeleted: number;
+  workspacesKept: number;
+  connectionsRevoked: number;
+  blueprintsDeleted: number;
+  /** Steps that failed, best-effort ones included. Storage is deleted only when this is empty. */
+  failures: string[];
 }
 
 /** A partial edit to one promoted format. Absent fields are left alone. */
